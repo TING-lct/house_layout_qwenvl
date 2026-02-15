@@ -92,6 +92,9 @@ def find_available_model() -> str:
         # 相对路径
         Path("models/Qwen2.5-VL-7B-Instruct"),
         Path("models/Qwen/Qwen2.5-VL-7B-Instruct"),
+        # AutoDL 目录（云服务器）
+        Path("/root/autodl-tmp/models/Qwen2.5-VL-7B-Instruct"),
+        Path("/autodl-tmp/models/Qwen2.5-VL-7B-Instruct"),
         # 常见缓存路径 (Windows)
         Path.home() / ".cache" / "huggingface" / "hub" / "models--Qwen--Qwen2.5-VL-7B-Instruct",
         Path.home() / ".cache" / "modelscope" / "hub" / "models" / "Qwen" / "Qwen2___5-VL-7B-Instruct",

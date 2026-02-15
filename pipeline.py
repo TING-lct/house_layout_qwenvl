@@ -700,8 +700,8 @@ if _os.name == 'nt':  # Windows
     }
 else:  # Linux
     QWEN14B_DEFAULT_PATHS = {
-        "base_model": "/home/nju/.cache/modelscope/hub/models/Qwen/Qwen2___5-14B-Instruct",
-        "adapter": "/saves/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"
+        "base_model": "/root/autodl-tmp/models/Qwen2.5-14B-Instruct",
+        "adapter": "/root/autodl-tmp/qwen14b/Qwen2.5-14B-Instruct/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"
     }
 
 

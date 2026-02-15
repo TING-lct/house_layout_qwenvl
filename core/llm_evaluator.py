@@ -511,8 +511,8 @@ def create_hybrid_evaluator(
 QWEN14B_DEFAULT_CONFIG = {
     # Linux 服务器路径
     "linux": {
-        "base_model": "/home/nju/.cache/modelscope/hub/models/Qwen/Qwen2___5-14B-Instruct",
-        "adapter": "/saves/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"
+        "base_model": "/root/autodl-tmp/models/Qwen2.5-14B-Instruct",
+        "adapter": "/root/autodl-tmp/qwen14b/Qwen2.5-14B-Instruct/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"
     },
     # Windows 本地路径（基座模型使用HF ID自动下载，或指定本地路径）
     "windows": {

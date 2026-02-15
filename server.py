@@ -145,7 +145,7 @@ async def startup_event():
 
 @app.post("/init_pipeline")
 async def init_pipeline(
-    base_model_path: str = Form("models/Qwen2.5-VL-7B-Instruct"),
+    base_model_path: str = Form("/root/autodl-tmp/models/Qwen2.5-VL-7B-Instruct"),
     lora_adapter_path: str = Form("lora_model"),
     device: str = Form("cuda")
 ):
