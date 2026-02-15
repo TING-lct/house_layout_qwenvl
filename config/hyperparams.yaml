@@ -1,0 +1,81 @@
+# 超参数配置
+
+# 模型配置
+model:
+  base_model_path: "models/Qwen2.5-VL-7B-Instruct"
+  lora_adapter_path: "lora_model"
+  device: "cuda"
+  torch_dtype: "auto"
+  use_flash_attention: false
+
+# 生成参数
+generation:
+  # 单次生成参数
+  default:
+    max_new_tokens: 256
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
+    repetition_penalty: 1.1
+  
+  # 多候选生成参数
+  multi_candidate:
+    num_candidates: 5
+    temperature_range: [0.6, 0.7, 0.8, 0.9, 1.0]
+    top_p: 0.9
+    do_sample: true
+    max_new_tokens: 256
+
+# 评估参数
+evaluation:
+  # 分数阈值
+  score_threshold: 85
+  # 最大迭代次数
+  max_iterations: 3
+  # 评估权重
+  weights:
+    空间合理性: 0.25
+    采光通风: 0.20
+    动线设计: 0.20
+    功能分区: 0.20
+    尺寸规范: 0.15
+
+# RAG配置
+rag:
+  # 检索数量
+  top_k: 3
+  # 向量模型
+  embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  # 知识库路径
+  knowledge_base_path: "data/knowledge_base.pkl"
+  # 相似度阈值
+  similarity_threshold: 0.5
+
+# 训练超参数搜索空间
+training:
+  search_space:
+    lora_rank: [4, 8, 16, 32]
+    lora_alpha: [8, 16, 32, 64]
+    learning_rate: [0.00001, 0.00003, 0.00005, 0.0001]
+    num_train_epochs: [2, 3, 5]
+    per_device_train_batch_size: [1, 2, 4]
+    gradient_accumulation_steps: [4, 8, 16]
+  
+  # 当前最优参数
+  best_params:
+    lora_rank: 8
+    lora_alpha: 16
+    learning_rate: 0.00005
+    num_train_epochs: 3
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 8
+
+# 优化器配置
+optimizer:
+  # 迭代优化
+  max_iterations: 3
+  improvement_threshold: 5  # 分数提升阈值
+  
+  # 规则引擎
+  enable_auto_fix: true
+  fix_max_attempts: 3

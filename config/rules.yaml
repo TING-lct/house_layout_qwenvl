@@ -1,0 +1,153 @@
+# 规则约束配置
+
+# 空间尺寸约束（单位：毫米）
+space_constraints:
+  卧室:
+    min_width: 2400
+    min_length: 3000
+    min_area: 7200000  # 7.2平方米
+    max_area: 25000000  # 25平方米
+  
+  主卧:
+    min_width: 3000
+    min_length: 3600
+    min_area: 10800000  # 10.8平方米
+    max_area: 30000000  # 30平方米
+  
+  客厅:
+    min_width: 3300
+    min_length: 4500
+    min_area: 14850000  # 14.85平方米
+    max_area: 50000000  # 50平方米
+  
+  厨房:
+    min_width: 1800
+    min_length: 2400
+    min_area: 4320000  # 4.32平方米
+    max_area: 15000000  # 15平方米
+  
+  卫生间:
+    min_width: 1500
+    min_length: 2100
+    min_area: 3150000  # 3.15平方米
+    max_area: 10000000  # 10平方米
+  
+  主卫:
+    min_width: 1800
+    min_length: 2400
+    min_area: 4320000  # 4.32平方米
+    max_area: 12000000  # 12平方米
+  
+  餐厅:
+    min_width: 2400
+    min_length: 3000
+    min_area: 7200000  # 7.2平方米
+    max_area: 20000000  # 20平方米
+  
+  储藏:
+    min_width: 1200
+    min_length: 1500
+    min_area: 1800000  # 1.8平方米
+    max_area: 8000000  # 8平方米
+  
+  阳台:
+    min_width: 1200
+    min_length: 2000
+    min_area: 2400000  # 2.4平方米
+    max_area: 15000000  # 15平方米
+
+# 房间类型分类
+room_categories:
+  公共区:
+    - 客厅
+    - 餐厅
+    - 厨房
+    - 阳台
+  
+  私密区:
+    - 卧室
+    - 卧室1
+    - 卧室2
+    - 卧室3
+    - 卧室4
+    - 主卧
+    - 次卧
+    - 主卫
+    - 卫生间
+  
+  服务区:
+    - 厨房
+    - 卫生间
+    - 主卫
+    - 储藏
+    - 储物间
+  
+  采光区:
+    - 采光
+    - 采光1
+    - 采光2
+    - 南采光
+    - 北采光
+    - 西采光
+    - 东采光
+
+# 相邻规则（不应相邻的房间对）
+adjacency_rules:
+  forbidden_pairs:
+    - ["厨房", "卫生间"]
+    - ["厨房", "主卫"]
+    - ["卧室", "厨房"]
+    - ["主卧", "厨房"]
+  
+  # 推荐相邻的房间对
+  recommended_pairs:
+    - ["厨房", "餐厅"]
+    - ["客厅", "餐厅"]
+    - ["主卧", "主卫"]
+    - ["卧室", "卫生间"]
+
+# 采光规则
+lighting_rules:
+  # 必须靠近采光面的房间
+  require_lighting:
+    - 客厅
+    - 卧室
+    - 卧室1
+    - 卧室2
+    - 卧室3
+    - 卧室4
+    - 主卧
+  
+  # 可以不靠近采光面的房间
+  no_lighting_required:
+    - 卫生间
+    - 主卫
+    - 储藏
+    - 厨房
+
+# 动线规则
+traffic_rules:
+  # 入口应可达的房间
+  entry_accessible:
+    - 客厅
+    - 玄关
+  
+  # 最大动线长度（毫米）
+  max_path_length: 15000
+
+# 评分权重
+scoring_weights:
+  空间合理性: 0.25
+  采光通风: 0.20
+  动线设计: 0.20
+  功能分区: 0.20
+  尺寸规范: 0.15
+
+# 违规扣分
+penalty_scores:
+  room_overlap: 30
+  boundary_exceed: 25
+  min_size_violation: 20
+  forbidden_adjacent: 15
+  no_lighting: 10
+  bad_traffic: 10

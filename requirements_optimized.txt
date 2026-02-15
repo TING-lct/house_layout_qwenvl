@@ -1,0 +1,28 @@
+# 户型布局生成系统依赖
+
+# 基础依赖
+torch>=2.0.0
+transformers>=4.37.0
+peft>=0.7.0
+accelerate>=0.25.0
+
+# Qwen-VL依赖
+qwen_vl_utils
+
+# RAG相关
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+
+# API服务
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+
+# 可视化
+matplotlib>=3.7.0
+
+# 配置文件
+pyyaml>=6.0
+
+# 其他工具
+Pillow>=9.0.0
