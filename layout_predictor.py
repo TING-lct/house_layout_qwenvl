@@ -22,6 +22,28 @@ from core.generator import LayoutResult, GenerationConfig
 logger = logging.getLogger(__name__)
 
 
+def _resolve_qwen_vl_model_class():
+    """解析可用的Qwen-VL模型类（兼容不同transformers版本）"""
+    try:
+        from transformers import Qwen2_5_VLForConditionalGeneration as model_cls
+        return model_cls, "Qwen2_5_VLForConditionalGeneration", False
+    except ImportError:
+        pass
+
+    try:
+        from transformers import Qwen2VLForConditionalGeneration as model_cls
+        return model_cls, "Qwen2VLForConditionalGeneration", False
+    except ImportError:
+        pass
+
+    try:
+        from transformers import AutoModelForVision2Seq as model_cls
+        return model_cls, "AutoModelForVision2Seq", True
+    except ImportError:
+        from transformers import AutoModelForCausalLM as model_cls
+        return model_cls, "AutoModelForCausalLM", True
+
+
 @dataclass
 class OptimizedResult:
     """优化后的生成结果"""
@@ -134,24 +156,34 @@ class LayoutPredictor:
             return
         
         import torch
-        from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+        from transformers import AutoProcessor
         from peft import PeftModel
+
+        model_cls, model_cls_name, use_trust_remote_code = _resolve_qwen_vl_model_class()
+        logger.info(f"使用模型类: {model_cls_name}")
         
         print(f"正在加载基础模型: {self.base_model_path}")
+
+        load_kwargs = {
+            "device_map": "auto",
+        }
+        if use_trust_remote_code:
+            # 兼容旧版 transformers，通过 auto class + remote code 加载
+            load_kwargs["trust_remote_code"] = True
         
         if self.use_flash_attention:
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.model = model_cls.from_pretrained(
                 self.base_model_path,
                 torch_dtype=torch.bfloat16,
                 attn_implementation="flash_attention_2",
-                device_map="auto",
+                **load_kwargs,
             )
         else:
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.model = model_cls.from_pretrained(
                 self.base_model_path,
                 torch_dtype="auto",
-                device_map="auto",
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                **load_kwargs,
             )
         
         # 加载LoRA适配器
