@@ -58,7 +58,7 @@ def _ensure_gpu_imports():
 @dataclass
 class GenerationConfig:
     """生成配置"""
-    max_new_tokens: int = 256
+    max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.9
     do_sample: bool = True
@@ -261,8 +261,8 @@ class LayoutGenerator:
             List[LayoutResult]: 候选结果列表
         """
         if temperature_range is None:
-            # 默认温度范围：从0.6到1.0
-            temperature_range = [0.6 + i * 0.1 for i in range(num_candidates)]
+            # 默认温度范围：从0.3到1.1（与layout_predictor一致）
+            temperature_range = [0.3 + i * 0.2 for i in range(num_candidates)]
         
         candidates = []
         

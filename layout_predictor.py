@@ -236,7 +236,15 @@ class LayoutPredictor:
         if self.lora_adapter_path:
             print(f"正在加载LoRA适配器: {self.lora_adapter_path}")
             try:
-                self.model = PeftModel.from_pretrained(self.model, self.lora_adapter_path)
+                import warnings
+                with warnings.catch_warnings():
+                    # 过滤 visual blocks 缺少 LoRA 权重的无害警告
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*missing adapter keys.*",
+                        category=UserWarning,
+                    )
+                    self.model = PeftModel.from_pretrained(self.model, self.lora_adapter_path)
                 self.model = self.model.half()
             except ValueError as e:
                 # LoRA 与基座模型不匹配时，跳过适配器
@@ -261,7 +269,7 @@ class LayoutPredictor:
         self,
         image_path: str,
         query: str,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
         do_sample: bool = True
@@ -333,21 +341,105 @@ class LayoutPredictor:
         return output_text[0] if output_text else ""
     
     def parse_output(self, output_text: str) -> Dict[str, List[int]]:
-        """解析模型输出为布局字典"""
-        try:
-            # 提取JSON部分
-            if "```json" in output_text:
-                json_str = output_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in output_text:
-                json_str = output_text.split("```")[1].split("```")[0].strip()
-            else:
-                json_str = output_text.strip()
-            
-            layout = json.loads(json_str)
-            return layout
-        except (json.JSONDecodeError, IndexError) as e:
-            print(f"解析输出失败: {e}")
+        """解析模型输出为布局字典（增强容错）"""
+        import re
+
+        # 第1步：提取 JSON 片段
+        json_str = self._extract_json_str(output_text)
+        if not json_str:
+            print(f"解析输出失败: 未找到JSON内容")
             return {}
+
+        # 第2步：尝试直接解析
+        try:
+            return self._validate_layout(json.loads(json_str))
+        except json.JSONDecodeError:
+            pass
+
+        # 第3步：清理常见 LLM 格式错误后重试
+        cleaned = self._clean_json_str(json_str)
+        try:
+            return self._validate_layout(json.loads(cleaned))
+        except json.JSONDecodeError:
+            pass
+
+        # 第4步：正则兜底提取 "房间名": [x, y, w, h]
+        try:
+            layout = {}
+            pattern = r'"([^"]+)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]'
+            for m in re.finditer(pattern, output_text):
+                name = m.group(1)
+                vals = [int(m.group(i)) for i in range(2, 6)]
+                layout[name] = vals
+            if layout:
+                return layout
+        except Exception:
+            pass
+
+        print(f"解析输出失败: 所有方法均失败")
+        return {}
+
+    @staticmethod
+    def _extract_json_str(text: str) -> str:
+        """从模型输出中提取 JSON 字符串"""
+        # 优先提取 ```json ... ``` 块
+        if "```json" in text:
+            parts = text.split("```json", 1)
+            if len(parts) > 1:
+                end = parts[1].find("```")
+                return parts[1][:end].strip() if end != -1 else parts[1].strip()
+        if "```" in text:
+            parts = text.split("```")
+            if len(parts) >= 2:
+                return parts[1].strip()
+        # 提取第一个 { ... } 块
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            # 未闭合，尝试补 }
+            return text[start:] + "}"
+        return text.strip()
+
+    @staticmethod
+    def _clean_json_str(s: str) -> str:
+        """清理 LLM 常见的 JSON 格式错误"""
+        import re
+        # 移除行注释
+        s = re.sub(r'//[^\n]*', '', s)
+        # 移除末尾多余逗号（对象/数组最后一个元素后面）
+        s = re.sub(r',\s*([}\]])', r'\1', s)
+        # 修复单引号 -> 双引号
+        # 仅在键名位置替换
+        s = re.sub(r"(?<=\{|,)\s*'([^']+)'\s*:", r' "\1":', s)
+        # 移除可能的省略号
+        s = re.sub(r'\.{3,}', '', s)
+        # 确保闭合
+        open_braces = s.count('{') - s.count('}')
+        s += '}' * max(0, open_braces)
+        open_brackets = s.count('[') - s.count(']')
+        s += ']' * max(0, open_brackets)
+        return s
+
+    @staticmethod
+    def _validate_layout(data) -> Dict[str, List[int]]:
+        """验证解析结果是否为合法布局字典"""
+        if not isinstance(data, dict):
+            return {}
+        layout = {}
+        for k, v in data.items():
+            if isinstance(v, list) and len(v) == 4:
+                try:
+                    layout[k] = [int(x) for x in v]
+                except (ValueError, TypeError):
+                    continue
+        return layout
     
     def generate(
         self,
@@ -693,26 +785,18 @@ class LayoutPredictor:
         对应优化技术方案中的 "迭代优化流程"：
         生成初始布局 → 评估打分 → 识别问题 → 针对性修正 → 循环
         """
-        issues_text = "\n".join(f"  - {issue}" for issue in issues)
-        layout_json = json.dumps(current_layout, ensure_ascii=False, indent=2)
+        # 取最重要的前5个问题，避免 prompt 过长导致输出跑偏
+        top_issues = issues[:5]
+        issues_text = "；".join(top_issues)
+        layout_json = json.dumps(current_layout, ensure_ascii=False)
         
-        # 尝试使用配置文件中的fix_prompt模板
-        fix_template = self.prompts_config.get('fix_prompt', '')
-        if fix_template and '{issues}' in fix_template:
-            fix_section = fix_template.format(
-                issues=issues_text,
-                original_layout=layout_json
-            )
-        else:
-            fix_section = (
-                f"\n注意：上一次生成的布局存在以下问题，请在本次生成中避免：\n"
-                f"{issues_text}\n\n"
-                f"上一次的布局（仅供参考，需要改进）：\n"
-                f"```json\n{layout_json}\n```\n\n"
-                f"请生成一个改进后的布局，解决上述问题。"
-            )
-        
-        return f"{original_query}\n{fix_section}"
+        # 修正查询保持简洁，贴近训练数据格式
+        return (
+            f"{original_query}\n"
+            f"注意避免以下问题：{issues_text}。\n"
+            f"上次结果供参考：\n```json\n{layout_json}\n```\n"
+            f"请直接输出修正后的JSON，格式为 ```json\n{{...}}\n```"
+        )
     
     def evaluate(
         self,
@@ -759,33 +843,18 @@ def build_query(
     existing_json = json.dumps(existing_params, ensure_ascii=False)
     rooms_json = json.dumps(rooms_to_generate, ensure_ascii=False)
     
-    # 获取设计约束
-    if design_constraints is None and prompts_config:
-        design_constraints = prompts_config.get('design_constraints', '')
-    elif design_constraints is None:
-        # 尝试从配置文件加载
-        config_path = Path(__file__).parent / 'config' / 'prompts.yaml'
-        if config_path.exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f)
-                design_constraints = config.get('design_constraints', '')
-            except Exception:
-                design_constraints = ''
-    
-    # 构建带约束的查询
-    constraints_section = ""
-    if design_constraints:
-        constraints_section = f"\n{design_constraints.strip()}\n"
-    
-    query = f'''请根据这张图片中已有的户型信息以及对应的参数，帮我生成其余房间的参数，得到一个完整的合理平面布局。构成户型的所有空间单元均表示为矩形，用x轴坐标、y轴坐标、长度、宽度四个参数表示。本户型为"{house_type}"住宅，图片中的为"{floor_type}"平面。
-{constraints_section}
-图片中已有信息对应的参数为：
-```json
-{existing_json}
-```其余待生成的"{floor_type}"房间的名称为：
-```json
-{rooms_json}```'''
+    # 与训练数据完全一致的提示词格式
+    # 训练时的 prompt 没有额外设计约束，保持一致可大幅降低解析失败率
+    query = (
+        f'请根据这张图片中已有的户型信息以及对应的参数，帮我生成其余房间的参数，'
+        f'得到一个完整的合理平面布局。构成户型的所有空间单元均表示为矩形，'
+        f'用x轴坐标、y轴坐标、长度、宽度四个参数表示。'
+        f'本户型为"{house_type}"住宅，图片中的为"{floor_type}"平面。\n'
+        f'图片中已有信息对应的参数为：\n'
+        f'```json\n{existing_json}\n```'
+        f'其余待生成的"{floor_type}"房间的名称为：\n'
+        f'```json\n{rooms_json}```'
+    )
     
     return query
 

@@ -213,17 +213,14 @@ def run_generation(
     print(f"  ✅ 模型加载完成")
     
     # ========== 第2步：构建查询 ==========
-    print("\n📝 [2/4] 构建带设计约束的查询...")
+    print("\n📝 [2/4] 构建查询（与训练数据格式一致）...")
     query = build_query(
         house_type=case["house_type"],
         floor_type=case["floor_type"],
         existing_params=case["existing_params"],
-        rooms_to_generate=case["rooms_to_generate"],
-        prompts_config=predictor.prompts_config  # 注入设计约束
+        rooms_to_generate=case["rooms_to_generate"]
     )
     print(f"  查询长度: {len(query)} 字符")
-    has_constraints = '不能重叠' in query or '设计约束' in query
-    print(f"  设计约束已注入: {has_constraints}")
     
     # ========== 第3步：优化生成 ==========
     print("\n🔄 [3/4] 开始优化生成流程...")

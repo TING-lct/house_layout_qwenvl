@@ -55,15 +55,16 @@ class LayoutVisualizer:
         """
         self.figsize = figsize
         
-        # 尝试设置中文字体（跨平台兼容）
-        self.font = self._find_cjk_font()
+        # 设置中文字体（跨平台兼容）
+        self.font = self._setup_cjk_font()
     
     @staticmethod
-    def _find_cjk_font() -> FontProperties:
-        """查找系统中可用的中文字体"""
-        import os, platform
+    def _setup_cjk_font() -> FontProperties:
+        """设置中文字体，同时配置 matplotlib 全局 rcParams"""
+        import os, platform, subprocess
+        from matplotlib.font_manager import FontProperties, fontManager
         
-        # 按优先级列出候选字体文件（绝对路径）
+        # 按优先级列出候选字体文件
         candidates = []
         
         if platform.system() == "Windows":
@@ -74,7 +75,7 @@ class LayoutVisualizer:
                 os.path.join(win_fonts, "simsun.ttc"),
             ]
         else:
-            # Linux / macOS 常见中文字体路径
+            # Linux 常见中文字体路径
             candidates += [
                 "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
                 "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
@@ -83,19 +84,56 @@ class LayoutVisualizer:
                 "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
                 "/usr/share/fonts/SimHei.ttf",
-                # macOS
-                "/System/Library/Fonts/PingFang.ttc",
-                "/System/Library/Fonts/STHeiti Light.ttc",
             ]
+            # 动态搜索 fc-list 找到的 CJK 字体
+            try:
+                result = subprocess.run(
+                    ["fc-list", ":lang=zh", "--format=%{file}\n"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        path = line.strip()
+                        if path and os.path.isfile(path):
+                            candidates.append(path)
+            except Exception:
+                pass
         
+        # 尝试找到可用的字体文件
+        found_path = None
         for path in candidates:
             if os.path.isfile(path):
-                try:
-                    return FontProperties(fname=path)
-                except Exception:
-                    continue
+                found_path = path
+                break
         
-        # 都找不到就用 matplotlib 默认字体
+        if found_path:
+            try:
+                fp = FontProperties(fname=found_path)
+                font_name = fp.get_name()
+                # 注册到 matplotlib 全局，确保 tight_layout/savefig 也能用
+                fontManager.addfont(found_path)
+                plt.rcParams['font.family'] = [font_name, 'sans-serif']
+                plt.rcParams['axes.unicode_minus'] = False
+                return fp
+            except Exception:
+                pass
+        
+        # 尝试 matplotlib 已知的 CJK 字体名称
+        for family in ['WenQuanYi Zen Hei', 'WenQuanYi Micro Hei',
+                        'Noto Sans CJK SC', 'Noto Sans SC',
+                        'SimHei', 'Microsoft YaHei']:
+            try:
+                fp = FontProperties(family=family)
+                # 验证字体是否真的能找到
+                from matplotlib.font_manager import findfont
+                real_path = findfont(fp)
+                if real_path and 'DejaVu' not in real_path:
+                    plt.rcParams['font.family'] = [family, 'sans-serif']
+                    plt.rcParams['axes.unicode_minus'] = False
+                    return fp
+            except Exception:
+                continue
+        
         return FontProperties()
     
     def visualize(
