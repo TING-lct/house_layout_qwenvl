@@ -88,6 +88,46 @@ TEST_CASES = {
 
 def find_available_model() -> str:
     """查找可用的基座模型路径"""
+    def _is_model_dir_complete(model_dir: Path) -> bool:
+        """检查本地模型目录是否完整（重点检查 safetensors 分片）"""
+        if not model_dir.exists() or not model_dir.is_dir():
+            return False
+
+        # 基础配置文件至少应存在一个
+        has_config = (model_dir / "config.json").exists()
+        if not has_config:
+            return False
+
+        index_file = model_dir / "model.safetensors.index.json"
+        if index_file.exists():
+            try:
+                data = json.loads(index_file.read_text(encoding="utf-8"))
+                weight_map = data.get("weight_map", {})
+                shard_files = sorted(set(weight_map.values()))
+                if not shard_files:
+                    logger.warning(f"模型索引为空，跳过: {model_dir}")
+                    return False
+
+                missing = [name for name in shard_files if not (model_dir / name).exists()]
+                if missing:
+                    logger.warning(
+                        "本地模型分片不完整，缺失 %d 个文件（示例: %s），跳过: %s",
+                        len(missing),
+                        missing[0],
+                        model_dir,
+                    )
+                    return False
+                return True
+            except Exception as e:
+                logger.warning(f"读取模型索引失败，跳过: {model_dir}, 错误: {e}")
+                return False
+
+        # 兼容无索引场景：至少有一个权重文件
+        has_single_bin = (model_dir / "pytorch_model.bin").exists()
+        has_single_safe = (model_dir / "model.safetensors").exists()
+        has_shards = bool(list(model_dir.glob("model-*-of-*.safetensors")))
+        return has_single_bin or has_single_safe or has_shards
+
     candidates = [
         # 相对路径
         Path("models/Qwen2.5-VL-7B-Instruct"),
@@ -101,9 +141,11 @@ def find_available_model() -> str:
     ]
     
     for p in candidates:
-        if p.exists():
+        if _is_model_dir_complete(p):
             logger.info(f"找到本地模型: {p}")
             return str(p)
+        elif p.exists():
+            logger.warning(f"检测到本地模型目录但不完整，已跳过: {p}")
     
     # 返回 HuggingFace ID，让 transformers 自动下载
     logger.info("本地未找到模型，将使用 HuggingFace 自动下载: Qwen/Qwen2.5-VL-7B-Instruct")

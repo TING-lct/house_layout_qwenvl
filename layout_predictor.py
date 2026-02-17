@@ -44,6 +44,15 @@ def _resolve_qwen_vl_model_class():
         return model_cls, "AutoModelForCausalLM", True
 
 
+def _is_unknown_qwen25_arch_error(exc: Exception) -> bool:
+    """是否为 transformers 版本过低导致无法识别 qwen2_5_vl 架构"""
+    msg = str(exc)
+    return (
+        "model type `qwen2_5_vl`" in msg
+        and "does not recognize this architecture" in msg
+    )
+
+
 @dataclass
 class OptimizedResult:
     """优化后的生成结果"""
@@ -164,6 +173,8 @@ class LayoutPredictor:
         
         print(f"正在加载基础模型: {self.base_model_path}")
 
+        model_source = self.base_model_path
+
         load_kwargs = {
             "device_map": "auto",
         }
@@ -171,30 +182,75 @@ class LayoutPredictor:
             # 兼容旧版 transformers，通过 auto class + remote code 加载
             load_kwargs["trust_remote_code"] = True
         
-        if self.use_flash_attention:
-            self.model = model_cls.from_pretrained(
-                self.base_model_path,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                **load_kwargs,
-            )
-        else:
-            self.model = model_cls.from_pretrained(
-                self.base_model_path,
+        def _load_from(source: str):
+            if self.use_flash_attention:
+                return model_cls.from_pretrained(
+                    source,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    **load_kwargs,
+                )
+            return model_cls.from_pretrained(
+                source,
                 torch_dtype="auto",
                 low_cpu_mem_usage=True,
                 **load_kwargs,
             )
+
+        try:
+            self.model = _load_from(model_source)
+        except FileNotFoundError as e:
+            # 如果是本地目录缺分片，自动回退到 HuggingFace ID 进行下载加载
+            fallback_source = "Qwen/Qwen2.5-VL-7B-Instruct"
+            logger.warning(
+                "本地模型不完整，自动回退到远端模型: %s（原路径: %s）",
+                fallback_source,
+                model_source,
+            )
+            try:
+                self.model = _load_from(fallback_source)
+                model_source = fallback_source
+            except Exception:
+                raise RuntimeError(
+                    "本地模型目录不完整，且远端回退加载失败。\n"
+                    f"本地路径: {self.base_model_path}\n"
+                    f"回退模型: {fallback_source}\n"
+                    "请删除损坏目录后重试，或检查网络后再次运行。"
+                ) from e
+        except Exception as e:
+            if _is_unknown_qwen25_arch_error(e):
+                import transformers
+
+                current_version = getattr(transformers, "__version__", "unknown")
+                raise RuntimeError(
+                    "当前 transformers 版本不支持 Qwen2.5-VL（缺少 qwen2_5_vl 架构）。\n"
+                    f"当前版本: {current_version}\n"
+                    "请在当前环境执行升级：\n"
+                    "  pip install -U 'transformers>=4.45.0'\n"
+                    "如仍失败，再执行：\n"
+                    "  pip install -U qwen-vl-utils"
+                ) from e
+            raise
         
         # 加载LoRA适配器
         if self.lora_adapter_path:
             print(f"正在加载LoRA适配器: {self.lora_adapter_path}")
-            self.model = PeftModel.from_pretrained(self.model, self.lora_adapter_path)
-            self.model = self.model.half()
+            try:
+                self.model = PeftModel.from_pretrained(self.model, self.lora_adapter_path)
+                self.model = self.model.half()
+            except ValueError as e:
+                # LoRA 与基座模型不匹配时，跳过适配器
+                logger.warning(
+                    "LoRA 适配器与基座模型不匹配，已跳过。"
+                    "原因: %s",
+                    e,
+                )
         
         # 加载处理器
+        # 若发生了本地->远端回退，处理器也使用同一来源
+        self.base_model_path = model_source
         self.processor = AutoProcessor.from_pretrained(
-            self.base_model_path, 
+            model_source,
             use_fast=True
         )
         

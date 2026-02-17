@@ -27,37 +27,38 @@ from pathlib import Path
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent
-MODELS_DIR = PROJECT_ROOT / "models"
+DEFAULT_MODELS_DIR = PROJECT_ROOT.parent / "models"
 
 
 # ==================== 模型定义 ====================
 
-MODELS = {
-    "7b": {
-        "name": "Qwen2.5-VL-7B-Instruct",
-        "desc": "户型图生成模型（必需，~15GB）",
-        "huggingface_id": "Qwen/Qwen2.5-VL-7B-Instruct",
-        "modelscope_id": "Qwen/Qwen2.5-VL-7B-Instruct",
-        "local_dir": MODELS_DIR / "Qwen2.5-VL-7B-Instruct",
-        "required": True,
-    },
-    "14b": {
-        "name": "Qwen2.5-14B-Instruct",
-        "desc": "LLM评估模型（可选，~28GB）",
-        "huggingface_id": "Qwen/Qwen2.5-14B-Instruct",
-        "modelscope_id": "Qwen/Qwen2.5-14B-Instruct",
-        "local_dir": MODELS_DIR / "Qwen2.5-14B-Instruct",
-        "required": False,
-    },
-    "embed": {
-        "name": "paraphrase-multilingual-MiniLM-L12-v2",
-        "desc": "RAG向量嵌入模型（可选，~0.5GB）",
-        "huggingface_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        "modelscope_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        "local_dir": MODELS_DIR / "sentence-transformers" / "paraphrase-multilingual-MiniLM-L12-v2",
-        "required": False,
-    },
-}
+def build_models(models_dir: Path) -> dict:
+    return {
+        "7b": {
+            "name": "Qwen2.5-VL-7B-Instruct",
+            "desc": "户型图生成模型（必需，~15GB）",
+            "huggingface_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "modelscope_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "local_dir": models_dir / "Qwen2.5-VL-7B-Instruct",
+            "required": True,
+        },
+        "14b": {
+            "name": "Qwen2.5-14B-Instruct",
+            "desc": "LLM评估模型（可选，~28GB）",
+            "huggingface_id": "Qwen/Qwen2.5-14B-Instruct",
+            "modelscope_id": "Qwen/Qwen2.5-14B-Instruct",
+            "local_dir": models_dir / "Qwen2.5-14B-Instruct",
+            "required": False,
+        },
+        "embed": {
+            "name": "paraphrase-multilingual-MiniLM-L12-v2",
+            "desc": "RAG向量嵌入模型（可选，~0.5GB）",
+            "huggingface_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            "modelscope_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            "local_dir": models_dir / "sentence-transformers" / "paraphrase-multilingual-MiniLM-L12-v2",
+            "required": False,
+        },
+    }
 
 
 # ==================== 下载函数 ====================
@@ -81,7 +82,7 @@ def get_disk_free_gb(path: Path) -> float:
     return free / (1024 ** 3)
 
 
-def download_from_huggingface(model_info: dict) -> bool:
+def download_from_huggingface(model_info: dict, models_dir: Path) -> bool:
     """从 HuggingFace 下载模型"""
     model_id = model_info["huggingface_id"]
     local_dir = model_info["local_dir"]
@@ -117,7 +118,7 @@ def download_from_huggingface(model_info: dict) -> bool:
         return True
 
 
-def download_from_modelscope(model_info: dict) -> bool:
+def download_from_modelscope(model_info: dict, models_dir: Path) -> bool:
     """从 ModelScope 下载模型（国内推荐）"""
     model_id = model_info["modelscope_id"]
     local_dir = model_info["local_dir"]
@@ -132,12 +133,12 @@ def download_from_modelscope(model_info: dict) -> bool:
         
         ms_download(
             model_id,
-            cache_dir=str(MODELS_DIR),
+            cache_dir=str(models_dir),
             revision="master",
         )
         
         # ModelScope 下载的目录结构可能不同，做一下兼容
-        ms_cache_dir = MODELS_DIR / model_id.replace("/", os.sep)
+        ms_cache_dir = models_dir / model_id.replace("/", os.sep)
         if ms_cache_dir.exists() and not local_dir.exists():
             ms_cache_dir.rename(local_dir)
         
@@ -151,13 +152,19 @@ def download_from_modelscope(model_info: dict) -> bool:
         local_dir.parent.mkdir(parents=True, exist_ok=True)
         ms_download(
             model_id,
-            cache_dir=str(MODELS_DIR),
+            cache_dir=str(models_dir),
             revision="master",
         )
         return True
 
 
-def download_model(key: str, source: str = "huggingface") -> bool:
+def download_model(
+    key: str,
+    models: dict,
+    models_dir: Path,
+    source: str = "huggingface",
+    force: bool = False,
+) -> bool:
     """
     下载指定模型
     
@@ -165,7 +172,7 @@ def download_model(key: str, source: str = "huggingface") -> bool:
         key: 模型标识 (7b / 14b / embed)
         source: 下载源 (huggingface / modelscope)
     """
-    model_info = MODELS[key]
+    model_info = models[key]
     
     print(f"\n{'='*60}")
     print(f"📦 {model_info['name']}")
@@ -173,12 +180,17 @@ def download_model(key: str, source: str = "huggingface") -> bool:
     print(f"{'='*60}")
     
     # 检查是否已存在
-    if check_model_exists(model_info):
+    if check_model_exists(model_info) and not force:
         print(f"  ✅ 已存在，跳过下载: {model_info['local_dir']}")
         return True
+
+    if force and model_info["local_dir"].exists():
+        print(f"  ♻️ 强制重下，先删除旧目录: {model_info['local_dir']}")
+        import shutil
+        shutil.rmtree(model_info["local_dir"], ignore_errors=True)
     
     # 检查磁盘空间
-    free_gb = get_disk_free_gb(MODELS_DIR if MODELS_DIR.exists() else PROJECT_ROOT)
+    free_gb = get_disk_free_gb(models_dir if models_dir.exists() else PROJECT_ROOT)
     size_needed = {"7b": 16, "14b": 30, "embed": 1}[key]
     
     if free_gb < size_needed:
@@ -190,9 +202,9 @@ def download_model(key: str, source: str = "huggingface") -> bool:
     # 下载
     try:
         if source == "modelscope":
-            return download_from_modelscope(model_info)
+            return download_from_modelscope(model_info, models_dir)
         else:
-            return download_from_huggingface(model_info)
+            return download_from_huggingface(model_info, models_dir)
     except Exception as e:
         print(f"  ❌ 下载失败: {e}")
         
@@ -225,17 +237,28 @@ def main():
         "--all", action="store_true",
         help="下载全部模型（包括可选模型）"
     )
+    parser.add_argument(
+        "--models-dir", type=str, default=str(DEFAULT_MODELS_DIR),
+        help="模型保存目录（默认: 项目同级 models）"
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="强制重下（删除已存在目录后重下）"
+    )
     
     args = parser.parse_args()
     
+    models_dir = Path(args.models_dir).resolve()
+    models = build_models(models_dir)
+
     print("=" * 60)
     print("🏠 户型图生成 - 模型下载工具")
     print("=" * 60)
     print(f"  下载源: {args.source}")
-    print(f"  保存目录: {MODELS_DIR}")
+    print(f"  保存目录: {models_dir}")
     
     # 创建 models 目录
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
     
     # 确定要下载的模型
     if args.only:
@@ -251,7 +274,7 @@ def main():
     # 先显示计划
     print(f"\n📋 下载计划:")
     for key in targets:
-        m = MODELS[key]
+        m = models[key]
         exists = "✅ 已存在" if check_model_exists(m) else "⏳ 待下载"
         required = "必需" if m["required"] else "可选"
         print(f"  [{required}] {m['name']} - {exists}")
@@ -259,7 +282,13 @@ def main():
     # 执行下载
     results = {}
     for key in targets:
-        success = download_model(key, source=args.source)
+        success = download_model(
+            key,
+            models=models,
+            models_dir=models_dir,
+            source=args.source,
+            force=args.force,
+        )
         results[key] = success
     
     # 汇总
@@ -269,7 +298,7 @@ def main():
     
     all_ok = True
     for key, success in results.items():
-        m = MODELS[key]
+        m = models[key]
         status = "✅ 成功" if success else "❌ 失败"
         print(f"  {status} - {m['name']}")
         if not success and m["required"]:
