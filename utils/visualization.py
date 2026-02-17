@@ -55,11 +55,48 @@ class LayoutVisualizer:
         """
         self.figsize = figsize
         
-        # 尝试设置中文字体
-        try:
-            self.font = FontProperties(fname='C:/Windows/Fonts/simhei.ttf')
-        except:
-            self.font = FontProperties()
+        # 尝试设置中文字体（跨平台兼容）
+        self.font = self._find_cjk_font()
+    
+    @staticmethod
+    def _find_cjk_font() -> FontProperties:
+        """查找系统中可用的中文字体"""
+        import os, platform
+        
+        # 按优先级列出候选字体文件（绝对路径）
+        candidates = []
+        
+        if platform.system() == "Windows":
+            win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+            candidates += [
+                os.path.join(win_fonts, "simhei.ttf"),
+                os.path.join(win_fonts, "msyh.ttc"),
+                os.path.join(win_fonts, "simsun.ttc"),
+            ]
+        else:
+            # Linux / macOS 常见中文字体路径
+            candidates += [
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                "/usr/share/fonts/SimHei.ttf",
+                # macOS
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/STHeiti Light.ttc",
+            ]
+        
+        for path in candidates:
+            if os.path.isfile(path):
+                try:
+                    return FontProperties(fname=path)
+                except Exception:
+                    continue
+        
+        # 都找不到就用 matplotlib 默认字体
+        return FontProperties()
     
     def visualize(
         self,
