@@ -397,17 +397,17 @@ class LayoutRuleEngine:
         self,
         layout: Dict[str, List[int]],
         full_layout: Dict[str, List[int]] = None,
-        snap_threshold: int = 600
+        snap_threshold: int = 1800
     ) -> Dict[str, List[int]]:
         """
         将靠近边界的房间吸附到边界边缘。
-        对每个房间的四条边，如果与边界对应边的间隙 ≤ snap_threshold，
-        则将该边贴紧边界，同时避免引入新重叠。
+        对每个房间的四条边**逐条独立**检测：如果与边界对应边的间隙 ≤ snap_threshold，
+        则将该边贴紧边界；如果该条吸附导致重叠则单独回退该条，不影响其他方向。
 
         Args:
             layout: 生成的布局
             full_layout: 完整布局（含边界）
-            snap_threshold: 吸附距离阈值(mm)，默认600mm
+            snap_threshold: 吸附距离阈值(mm)，默认1800mm
         """
         fixed = {k: v.copy() for k, v in layout.items()}
         combined_base = dict(full_layout or {})
@@ -428,38 +428,40 @@ class LayoutRuleEngine:
             if len(params) != 4:
                 continue
 
-            saved = params[:]
-            changed = False
-
+            # 逐条边独立吸附，每条吸附后立即检查重叠
             # 左边吸附
             gap_left = params[0] - bx1
             if 0 < gap_left <= snap_threshold:
+                old_x = params[0]
                 params[0] = bx1
-                changed = True
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[0] = old_x
 
-            # 上边吸附 (y轴)
+            # 上边吸附 (y最小边)
             gap_top = params[1] - by1
             if 0 < gap_top <= snap_threshold:
+                old_y = params[1]
                 params[1] = by1
-                changed = True
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[1] = old_y
 
             # 右边吸附
             room_right = params[0] + params[2]
             gap_right = bx2 - room_right
             if 0 < gap_right <= snap_threshold:
+                old_x = params[0]
                 params[0] = bx2 - params[2]
-                changed = True
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[0] = old_x
 
-            # 下边吸附
+            # 下边吸附 (y最大边)
             room_bottom = params[1] + params[3]
             gap_bottom = by2 - room_bottom
             if 0 < gap_bottom <= snap_threshold:
+                old_y = params[1]
                 params[1] = by2 - params[3]
-                changed = True
-
-            # 检查吸附后是否产生重叠，若有则回退
-            if changed and self._would_overlap(name, params, fixed, combined_base):
-                params[:] = saved
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[1] = old_y
 
         return fixed
 
@@ -652,6 +654,104 @@ class LayoutRuleEngine:
 
     # ==================== 激进后处理（组合所有修复） ====================
 
+    def fix_living_room_position(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None
+    ) -> Dict[str, List[int]]:
+        """
+        如果客厅距离入口过远，尝试与离入口更近的卧室交换位置。
+        交换时保持各自的原始尺寸，仅交换(x,y)坐标。
+        交换后检查是否产生重叠/超界，若有则回退。
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **fixed})
+
+        # 找入口
+        entry = None
+        for name, params in (full_layout or {}).items():
+            if "入口" in name and len(params) == 4:
+                entry = Room(name=name, x=params[0], y=params[1],
+                             width=params[2], height=params[3])
+                break
+        if not entry:
+            return fixed
+
+        # 找客厅
+        living_name = None
+        for name in fixed:
+            if "客厅" in name:
+                living_name = name
+                break
+        if not living_name:
+            return fixed
+
+        lp = fixed[living_name]
+        living_room = Room(name=living_name, x=lp[0], y=lp[1],
+                           width=lp[2], height=lp[3])
+        living_dist = self._calc_dist(entry.center, living_room.center)
+
+        if living_dist <= 5000:
+            return fixed  # 已经足够近
+
+        # 找所有卧室，并筛选比客厅更近入口的
+        swap_candidates = []
+        for name in fixed:
+            if "卧" not in name:
+                continue
+            bp = fixed[name]
+            br = Room(name=name, x=bp[0], y=bp[1], width=bp[2], height=bp[3])
+            d = self._calc_dist(entry.center, br.center)
+            if d < living_dist - 1000:  # 至少近 1000mm 才值得交换
+                swap_candidates.append((name, d))
+
+        # 按距离入口从近到远排序
+        swap_candidates.sort(key=lambda x: x[1])
+
+        for swap_name, _ in swap_candidates:
+            saved_living = fixed[living_name][:]
+            saved_swap = fixed[swap_name][:]
+
+            # 交换坐标，保留各自尺寸
+            fixed[living_name][0] = saved_swap[0]
+            fixed[living_name][1] = saved_swap[1]
+            fixed[swap_name][0] = saved_living[0]
+            fixed[swap_name][1] = saved_living[1]
+
+            # 检查边界
+            ok = True
+            if boundary:
+                for n in (living_name, swap_name):
+                    p = fixed[n]
+                    if p[0] < boundary.x or p[1] < boundary.y:
+                        ok = False
+                    if p[0] + p[2] > boundary.x2 or p[1] + p[3] > boundary.y2:
+                        ok = False
+
+            # 检查重叠
+            if ok:
+                if self._would_overlap(living_name, fixed[living_name],
+                                       fixed, combined_base):
+                    ok = False
+            if ok:
+                if self._would_overlap(swap_name, fixed[swap_name],
+                                       fixed, combined_base):
+                    ok = False
+
+            if ok:
+                return fixed  # 交换成功
+            else:
+                # 回退
+                fixed[living_name][:] = saved_living
+                fixed[swap_name][:] = saved_swap
+
+        return fixed
+
+    @staticmethod
+    def _calc_dist(c1, c2):
+        return ((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2) ** 0.5
+
     def aggressive_post_process(
         self,
         layout: Dict[str, List[int]],
@@ -665,8 +765,9 @@ class LayoutRuleEngine:
         调用顺序（每遍）：
         1. validate_and_fix  — 解决重叠、超界等硬性问题
         2. optimize_dimensions_with_reposition — 扩大不足房间（含重定位）
-        3. fix_forbidden_adjacency — 拉开禁止相邻的房间
-        4. snap_to_boundary — 吸附到边界
+        3. fix_living_room_position — 客厅远离入口时与卧室交换
+        4. fix_forbidden_adjacency — 拉开禁止相邻的房间
+        5. snap_to_boundary — 吸附到边界
         """
         current = {k: v.copy() for k, v in layout.items()}
 
@@ -681,10 +782,13 @@ class LayoutRuleEngine:
             # 2. 带重定位的尺寸优化
             current = self.optimize_dimensions_with_reposition(current, full_layout)
 
-            # 3. 禁止相邻修复
+            # 3. 客厅位置修正（与卧室交换）
+            current = self.fix_living_room_position(current, full_layout)
+
+            # 4. 禁止相邻修复
             current = self.fix_forbidden_adjacency(current, full_layout)
 
-            # 4. 边界吸附
+            # 5. 边界吸附
             current = self.snap_to_boundary(current, full_layout)
 
             # 检查是否有变化，无变化则提前终止

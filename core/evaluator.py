@@ -375,7 +375,7 @@ class LayoutEvaluator:
         rooms: List[Room],
         full_layout: Dict[str, List[int]]
     ) -> Tuple[float, List[str]]:
-        """检查动线设计"""
+        """检查动线设计：客厅靠近入口 + 空间覆盖率 + 餐厅厨房联动"""
         score = 100.0
         issues = []
         
@@ -392,9 +392,34 @@ class LayoutEvaluator:
             living_room = next((r for r in rooms if "客厅" in r.name), None)
             if living_room:
                 distance = self._calculate_distance(entry, living_room)
-                if distance > 8000:  # 8米
-                    score -= 15
+                if distance > 5000:  # 5米
+                    score -= 40
                     issues.append("客厅距离入口过远")
+        
+        # 检查空间覆盖率
+        boundary = None
+        for name, params in full_layout.items():
+            if name == "边界" and len(params) == 4:
+                boundary = Room(name=name, x=params[0], y=params[1],
+                               width=params[2], height=params[3])
+                break
+        if boundary and rooms:
+            total_room_area = sum(r.area for r in rooms)
+            coverage = total_room_area / boundary.area if boundary.area > 0 else 0
+            if coverage < 0.65:
+                score -= 20
+                issues.append(f"空间覆盖率不足({coverage:.0%})，存在大面积空白")
+            elif coverage < 0.75:
+                score -= 10
+                issues.append(f"空间覆盖率偏低({coverage:.0%})")
+        
+        # 检查餐厅是否靠近厨房
+        dining = next((r for r in rooms if "餐厅" in r.name), None)
+        kitchen = next((r for r in rooms if "厨房" in r.name), None)
+        if dining and kitchen:
+            if not dining.is_adjacent(kitchen, tolerance=500):
+                score -= 10
+                issues.append("餐厅未与厨房相邻")
         
         return max(0, score), issues
     

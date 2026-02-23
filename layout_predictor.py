@@ -979,6 +979,8 @@ def build_query(
     
     constraints.append("厨房不宜与卫生间直接相邻")
     constraints.append("客厅、卧室应靠近采光面")
+    constraints.append("客厅必须靠近主入口，距离入口不超过5米")
+    constraints.append("餐厅应与厨房相邻")
     
     query += "\n注意：" + "；".join(constraints) + "。"
     query += "\n请直接输出JSON，格式为```json\n{...}\n```"
