@@ -272,7 +272,8 @@ class LayoutPredictor:
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        do_sample: bool = True
+        do_sample: bool = True,
+        repetition_penalty: float = 1.1
     ) -> str:
         """
         原始生成（复用gen.ipynb的推理代码）
@@ -319,13 +320,16 @@ class LayoutPredictor:
         inputs = inputs.to(self.device)
         
         # 生成
-        generated_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=do_sample
-        )
+        import torch
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                repetition_penalty=repetition_penalty
+            )
         
         # 解码
         generated_ids_trimmed = [
@@ -470,7 +474,8 @@ class LayoutPredictor:
             max_new_tokens=config.max_new_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
-            do_sample=config.do_sample
+            do_sample=config.do_sample,
+            repetition_penalty=config.repetition_penalty
         )
         
         # 解析输出
@@ -517,7 +522,7 @@ class LayoutPredictor:
             List[LayoutResult]: 候选结果列表
         """
         if temperatures is None:
-            temperatures = [0.3, 0.5, 0.7, 0.9, 1.1][:num_candidates]
+            temperatures = [0.3, 0.5, 0.7, 0.85, 0.95][:num_candidates]
         
         candidates = []
         for temp in temperatures:
@@ -979,8 +984,10 @@ def build_query(
     
     constraints.append("厨房不宜与卫生间直接相邻")
     constraints.append("客厅、卧室应靠近采光面")
-    constraints.append("客厅必须靠近主入口，距离入口不超过5米")
+    constraints.append("客厅应靠近主入口")
     constraints.append("餐厅应与厨房相邻")
+    constraints.append("房间应尽量填满边界空间，避免大面积空白")
+    constraints.append("房间长宽比不宜超过4:1")
     
     query += "\n注意：" + "；".join(constraints) + "。"
     query += "\n请直接输出JSON，格式为```json\n{...}\n```"

@@ -238,8 +238,8 @@ class LayoutEvaluator:
         suggestions = []
         details = {}
         
-        # 1. 空间合理性评分
-        space_score, space_issues = self._check_space_rationality(rooms, boundary)
+        # 1. 空间合理性评分（含基础设施重叠检查）
+        space_score, space_issues = self._check_space_rationality(rooms, boundary, combined_layout)
         issues.extend(space_issues)
         details['space_rationality'] = {'score': space_score, 'issues': space_issues}
         
@@ -295,9 +295,10 @@ class LayoutEvaluator:
     def _check_space_rationality(
         self, 
         rooms: List[Room], 
-        boundary: Optional[Room]
+        boundary: Optional[Room],
+        full_layout: Dict[str, List[int]] = None
     ) -> Tuple[float, List[str]]:
-        """检查空间合理性"""
+        """检查空间合理性（含基础设施重叠检查）"""
         score = 100.0
         issues = []
         
@@ -314,6 +315,47 @@ class LayoutEvaluator:
                 if not self._is_within_boundary(room, boundary):
                     score -= self.penalties.get('boundary_exceed', 25)
                     issues.append(f"超出边界: {room.name}")
+        
+        # 检查房间与基础设施重叠（采光区、黑体、主入口）
+        if full_layout:
+            dir_prefixes = ('南采光', '北采光', '东采光', '西采光')
+            infra_prefixes = ('采光', '黑体', '主入口')
+            for room in rooms:
+                for name, params in full_layout.items():
+                    if name == '边界' or len(params) != 4:
+                        continue
+                    if any(name.startswith(p) for p in dir_prefixes):
+                        continue
+                    is_infra = any(name.startswith(p) for p in infra_prefixes)
+                    if not is_infra:
+                        continue
+                    infra = Room(name=name, x=params[0], y=params[1],
+                                 width=params[2], height=params[3])
+                    if room.overlaps(infra):
+                        score -= self.penalties.get('room_overlap', 30)
+                        issues.append(f"房间与基础设施重叠: {room.name} 与 {name}")
+        
+        # 检查空间覆盖率（房间总面积占可用面积比例）
+        if boundary and rooms:
+            total_room_area = sum(r.area for r in rooms)
+            dir_prefixes = ('南采光', '北采光', '东采光', '西采光')
+            infra_area = 0
+            if full_layout:
+                for infra_name, infra_params in full_layout.items():
+                    if infra_name == '边界' or len(infra_params) != 4:
+                        continue
+                    if any(infra_name.startswith(p) for p in dir_prefixes):
+                        continue
+                    if any(infra_name.startswith(p) for p in ('采光', '黑体', '主入口')):
+                        infra_area += infra_params[2] * infra_params[3]
+            available_area = max(boundary.area - infra_area, 1)
+            coverage = total_room_area / available_area
+            if coverage < 0.60:
+                score -= 15
+                issues.append(f"空间覆盖率严重不足({coverage:.0%})，存在大面积空白")
+            elif coverage < 0.70:
+                score -= 8
+                issues.append(f"空间覆盖率偏低({coverage:.0%})")
         
         return max(0, score), issues
     
@@ -388,38 +430,26 @@ class LayoutEvaluator:
                 break
         
         if entry:
-            # 检查客厅是否靠近入口
+            # 检查客厅是否靠近入口（阈值根据边界尺寸自适应）
             living_room = next((r for r in rooms if "客厅" in r.name), None)
             if living_room:
+                # 计算自适应距离阈值：边界对角线的40%，范围限制在3000-8000mm
+                boundary_for_dist = None
+                for bname, bparams in full_layout.items():
+                    if bname == "边界" and len(bparams) == 4:
+                        boundary_for_dist = Room(name=bname, x=bparams[0], y=bparams[1],
+                                                 width=bparams[2], height=bparams[3])
+                        break
+                if boundary_for_dist:
+                    diag = (boundary_for_dist.width**2 + boundary_for_dist.height**2)**0.5
+                    dist_threshold = max(3000, min(8000, diag * 0.4))
+                else:
+                    dist_threshold = 5000
+                
                 distance = self._calculate_distance(entry, living_room)
-                if distance > 5000:  # 5米
+                if distance > dist_threshold:
                     score -= 40
-                    issues.append("客厅距离入口过远")
-        
-        # 检查空间覆盖率
-        boundary = None
-        for name, params in full_layout.items():
-            if name == "边界" and len(params) == 4:
-                boundary = Room(name=name, x=params[0], y=params[1],
-                               width=params[2], height=params[3])
-                break
-        if boundary and rooms:
-            total_room_area = sum(r.area for r in rooms)
-            coverage = total_room_area / boundary.area if boundary.area > 0 else 0
-            if coverage < 0.65:
-                score -= 20
-                issues.append(f"空间覆盖率不足({coverage:.0%})，存在大面积空白")
-            elif coverage < 0.75:
-                score -= 10
-                issues.append(f"空间覆盖率偏低({coverage:.0%})")
-        
-        # 检查餐厅是否靠近厨房
-        dining = next((r for r in rooms if "餐厅" in r.name), None)
-        kitchen = next((r for r in rooms if "厨房" in r.name), None)
-        if dining and kitchen:
-            if not dining.is_adjacent(kitchen, tolerance=500):
-                score -= 10
-                issues.append("餐厅未与厨房相邻")
+                    issues.append(f"客厅距离入口过远({distance:.0f}mm，阈值{dist_threshold:.0f}mm)")
         
         return max(0, score), issues
     
@@ -430,7 +460,7 @@ class LayoutEvaluator:
         return ((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)**0.5
     
     def _check_functional_zoning(self, rooms: List[Room]) -> Tuple[float, List[str]]:
-        """检查功能分区"""
+        """检查功能分区：禁止相邻 + 推荐相邻"""
         score = 100.0
         issues = []
         
@@ -453,10 +483,28 @@ class LayoutEvaluator:
                             score -= self.penalties.get('forbidden_adjacent', 15)
                             issues.append(f"不宜相邻: {room1.name} 与 {room2.name}")
         
+        # 检查推荐相邻的房间对（餐厅-厨房、主卧-主卫等）
+        recommended_pairs = self.adjacency_rules.get('recommended_pairs', [])
+        for pair in recommended_pairs:
+            rooms_a = [r for r in rooms if self._get_room_type(r.name) == pair[0]]
+            rooms_b = [r for r in rooms if self._get_room_type(r.name) == pair[1]]
+            if rooms_a and rooms_b:
+                any_adjacent = False
+                for ra in rooms_a:
+                    for rb in rooms_b:
+                        if ra.is_adjacent(rb, tolerance=500):
+                            any_adjacent = True
+                            break
+                    if any_adjacent:
+                        break
+                if not any_adjacent:
+                    score -= 8
+                    issues.append(f"建议相邻但未相邻: {pair[0]} 与 {pair[1]}")
+        
         return max(0, score), issues
     
     def _check_dimension_standards(self, rooms: List[Room]) -> Tuple[float, List[str]]:
-        """检查尺寸规范"""
+        """检查尺寸规范：最小尺寸 + 最大面积 + 长宽比"""
         score = 100.0
         issues = []
         
@@ -469,6 +517,7 @@ class LayoutEvaluator:
                 min_width = constraints.get('min_width', 0)
                 min_length = constraints.get('min_length', 0)
                 min_area = constraints.get('min_area', 0)
+                max_area = constraints.get('max_area', float('inf'))
                 
                 actual_width = min(room.width, room.height)
                 actual_length = max(room.width, room.height)
@@ -484,29 +533,43 @@ class LayoutEvaluator:
                 if room.area < min_area:
                     score -= self.penalties.get('min_size_violation', 20)
                     issues.append(f"面积不足: {room.name} (最小{min_area/1000000:.1f}平米)")
+                
+                if room.area > max_area:
+                    score -= 10
+                    issues.append(f"面积过大: {room.name} ({room.area/1000000:.1f}平米，最大{max_area/1000000:.1f}平米)")
+            
+            # 检查长宽比（所有房间，超过4:1视为比例失调）
+            if room.width > 0 and room.height > 0:
+                ratio = max(room.width, room.height) / min(room.width, room.height)
+                if ratio > 4.0:
+                    score -= 10
+                    issues.append(f"比例失调: {room.name} (长宽比{ratio:.1f}:1)")
         
         return max(0, score), issues
     
     def _get_room_type(self, room_name: str) -> str:
-        """从房间名获取房间类型"""
-        # 移除数字后缀
+        """从房间名获取房间类型（支持更多变体名称）"""
         type_mappings = {
-            "卧室": ["卧室", "卧室1", "卧室2", "卧室3", "卧室4", "次卧"],
-            "主卧": ["主卧"],
-            "客厅": ["客厅"],
-            "厨房": ["厨房"],
-            "卫生间": ["卫生间", "公卫", "次卫"],
-            "主卫": ["主卫"],
-            "餐厅": ["餐厅"],
-            "储藏": ["储藏", "储物间", "储藏室"],
+            "主卧": ["主卧", "主卧室"],
+            "卧室": ["卧室", "卧室1", "卧室2", "卧室3", "卧室4", "卧室5",
+                     "次卧", "次卧1", "次卧2", "客卧", "书房卧室"],
+            "客厅": ["客厅", "起居室", "客餐厅"],
+            "厨房": ["厨房", "厨房1", "中厨", "西厨", "开放厨房"],
+            "卫生间": ["卫生间", "卫生间1", "卫生间2", "公卫", "次卫", "公共卫生间"],
+            "主卫": ["主卫", "主卫生间"],
+            "餐厅": ["餐厅", "餐厅1", "饭厅"],
+            "储藏": ["储藏", "储藏室", "储物间", "杂物间", "收纳间"],
+            "阳台": ["阳台", "阳台1", "阳台2", "生活阳台", "景观阳台"],
         }
         
+        # 精确匹配
         for room_type, names in type_mappings.items():
             if room_name in names:
                 return room_type
         
-        # 尝试模糊匹配
-        for room_type in type_mappings.keys():
+        # 模糊匹配（先匹配更具体的类型，避免"主卧"被匹配为"卧室"）
+        priority_order = ["主卧", "主卫", "卫生间", "卧室", "客厅", "厨房", "餐厅", "储藏", "阳台"]
+        for room_type in priority_order:
             if room_type in room_name:
                 return room_type
         

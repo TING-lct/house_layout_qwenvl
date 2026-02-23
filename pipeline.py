@@ -46,8 +46,8 @@ class PipelineConfig:
     
     # 生成配置
     num_candidates: int = 5
-    temperature_range: List[float] = field(default_factory=lambda: [0.6, 0.7, 0.8, 0.9, 1.0])
-    max_new_tokens: int = 256
+    temperature_range: List[float] = field(default_factory=lambda: [0.3, 0.5, 0.7, 0.85, 0.95])
+    max_new_tokens: int = 512
     
     # 优化配置
     score_threshold: float = 85.0

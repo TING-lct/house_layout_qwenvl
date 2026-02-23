@@ -4,6 +4,7 @@
 """
 
 import json
+import re
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -173,7 +174,9 @@ class LayoutGenerator:
         return inputs.to(self.device)
     
     def _parse_output(self, output_text: str) -> Dict[str, List[int]]:
-        """解析模型输出为布局字典"""
+        """解析模型输出为布局字典（增强容错）"""
+        import re
+        
         try:
             # 提取JSON部分
             if "```json" in output_text:
@@ -181,13 +184,51 @@ class LayoutGenerator:
             elif "```" in output_text:
                 json_str = output_text.split("```")[1].split("```")[0].strip()
             else:
-                json_str = output_text.strip()
+                # 提取第一个 { ... } 块
+                start = output_text.find("{")
+                if start != -1:
+                    depth = 0
+                    for i in range(start, len(output_text)):
+                        if output_text[i] == "{":
+                            depth += 1
+                        elif output_text[i] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                json_str = output_text[start:i + 1]
+                                break
+                    else:
+                        json_str = output_text[start:] + "}"
+                else:
+                    json_str = output_text.strip()
             
             layout = json.loads(json_str)
-            return layout
-        except (json.JSONDecodeError, IndexError) as e:
-            print(f"解析输出失败: {e}")
-            return {}
+            # 验证格式
+            validated = {}
+            for k, v in layout.items():
+                if isinstance(v, list) and len(v) == 4:
+                    try:
+                        validated[k] = [int(x) for x in v]
+                    except (ValueError, TypeError):
+                        continue
+            return validated
+        except (json.JSONDecodeError, IndexError):
+            pass
+        
+        # 正则兜底：提取 "房间名": [x, y, w, h]
+        try:
+            layout = {}
+            pattern = r'"([^"]+)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]'
+            for m in re.finditer(pattern, output_text):
+                name = m.group(1)
+                vals = [int(m.group(i)) for i in range(2, 6)]
+                layout[name] = vals
+            if layout:
+                return layout
+        except Exception:
+            pass
+        
+        print(f"解析输出失败: {output_text[:200]}")
+        return {}
     
     def generate(
         self,
@@ -261,8 +302,12 @@ class LayoutGenerator:
             List[LayoutResult]: 候选结果列表
         """
         if temperature_range is None:
-            # 默认温度范围：从0.3到1.1（与layout_predictor一致）
-            temperature_range = [0.3 + i * 0.2 for i in range(num_candidates)]
+            # 默认温度范围：0.3到0.95，避免过高温度产生低质量输出
+            temperatures_pool = [0.3, 0.5, 0.7, 0.85, 0.95]
+            temperature_range = temperatures_pool[:num_candidates]
+            if num_candidates > len(temperatures_pool):
+                step = 0.65 / num_candidates
+                temperature_range = [0.3 + i * step for i in range(num_candidates)]
         
         candidates = []
         

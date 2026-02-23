@@ -32,10 +32,12 @@ class LayoutMetrics:
         """
         self.space_constraints = space_constraints or {
             "卧室": {"min_width": 2400, "min_length": 3000, "min_area": 7200000},
+            "主卧": {"min_width": 3000, "min_length": 3600, "min_area": 10800000},
             "客厅": {"min_width": 3300, "min_length": 4500, "min_area": 14850000},
             "厨房": {"min_width": 1800, "min_length": 2400, "min_area": 4320000},
             "卫生间": {"min_width": 1500, "min_length": 2100, "min_area": 3150000},
-            "餐厅": {"min_width": 2400, "min_length": 3000, "min_area": 7200000},
+            "主卫": {"min_width": 1800, "min_length": 2400, "min_area": 4320000},
+            "餐厅": {"min_width": 1500, "min_length": 2000, "min_area": 3000000},
         }
     
     def calculate_all(
