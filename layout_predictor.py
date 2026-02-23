@@ -792,23 +792,71 @@ class LayoutPredictor:
         issues: List[str]
     ) -> str:
         """
-        构造迭代修正查询：将上一轮的问题注入Prompt
-        引导模型在下一次生成时避免这些问题
+        构造迭代修正查询：将评估问题转化为具体可操作的数值修正指令，
+        而不只是笼统地列出问题名。
         
-        对应优化技术方案中的 "迭代优化流程"：
-        生成初始布局 → 评估打分 → 识别问题 → 针对性修正 → 循环
+        例如 "宽度不足: 客厅 (最小3300mm)" → "客厅短边只有2100mm，需要≥3300mm"
+        例如 "房间重叠: 卧室1 与 卧室2" → "卧室1和卧室2矩形区域重叠，请调整坐标使其不交叉"
         """
-        # 取最重要的前5个问题，避免 prompt 过长导致输出跑偏
-        top_issues = issues[:5]
-        issues_text = "；".join(top_issues)
+        import re
+        
+        # 将问题转化为具体修正指令
+        fix_instructions = []
+        for issue in issues[:6]:  # 最多6条，避免过长
+            if "宽度不足" in issue or "长度不足" in issue:
+                # 从 issue 提取房间名和最小值
+                m = re.search(r'(宽度|长度)不足.*?:\s*(\S+)\s*\(最小(\d+)mm\)', issue)
+                if m:
+                    dim, room, min_val = m.group(1), m.group(2), m.group(3)
+                    params = current_layout.get(room)
+                    if params:
+                        actual_short = min(params[2], params[3])
+                        actual_long = max(params[2], params[3])
+                        if dim == "宽度":
+                            fix_instructions.append(
+                                f"{room}短边={actual_short}mm不足，需≥{min_val}mm"
+                            )
+                        else:
+                            fix_instructions.append(
+                                f"{room}长边={actual_long}mm不足，需≥{min_val}mm"
+                            )
+                    else:
+                        fix_instructions.append(issue)
+                else:
+                    fix_instructions.append(issue)
+            elif "面积不足" in issue:
+                m = re.search(r'面积不足.*?:\s*(\S+)\s*\(最小([\d.]+)平米\)', issue)
+                if m:
+                    room, min_area = m.group(1), m.group(2)
+                    params = current_layout.get(room)
+                    if params:
+                        actual = params[2] * params[3] / 1_000_000
+                        fix_instructions.append(
+                            f"{room}面积={actual:.1f}㎡不足，需≥{min_area}㎡"
+                        )
+                    else:
+                        fix_instructions.append(issue)
+                else:
+                    fix_instructions.append(issue)
+            elif "重叠" in issue:
+                fix_instructions.append(issue + "，请调整坐标使其不交叉")
+            elif "超出边界" in issue:
+                fix_instructions.append(issue + "，请缩小尺寸或移动位置")
+            elif "采光不足" in issue:
+                fix_instructions.append(issue + "，请将其移到靠近采光面的位置")
+            elif "不宜相邻" in issue:
+                fix_instructions.append(issue + "，请拉开它们的距离")
+            else:
+                fix_instructions.append(issue)
+        
+        issues_text = "；".join(fix_instructions)
         layout_json = json.dumps(current_layout, ensure_ascii=False)
         
-        # 修正查询保持简洁，贴近训练数据格式
         return (
             f"{original_query}\n"
-            f"注意避免以下问题：{issues_text}。\n"
-            f"上次结果供参考：\n```json\n{layout_json}\n```\n"
-            f"请直接输出修正后的JSON，格式为 ```json\n{{...}}\n```"
+            f"上次生成的结果存在问题，请修正：{issues_text}。\n"
+            f"上次结果：\n```json\n{layout_json}\n```\n"
+            f"请输出修正后的完整JSON，格式为```json\n{{...}}\n```"
         )
     
     def evaluate(
@@ -831,6 +879,41 @@ class LayoutPredictor:
         return self.rule_engine.validate(layout, existing_layout)
 
 
+# ==================== 房间类型 → 最小尺寸映射（与 rules.yaml 一致） ====================
+_ROOM_SIZE_SPEC = {
+    "卧室":   {"w": 2400, "l": 3000, "a": 7.2},
+    "主卧":   {"w": 3000, "l": 3600, "a": 10.8},
+    "客厅":   {"w": 3300, "l": 4500, "a": 14.85},
+    "厨房":   {"w": 1800, "l": 2400, "a": 4.32},
+    "卫生间": {"w": 1500, "l": 2100, "a": 3.15},
+    "主卫":   {"w": 1800, "l": 2400, "a": 4.32},
+    "餐厅":   {"w": 2400, "l": 3000, "a": 7.2},
+}
+
+def _room_type(name: str) -> str:
+    """房间名 → 类型（卧室1→卧室）"""
+    for t in _ROOM_SIZE_SPEC:
+        if t in name:
+            return t
+    return name
+
+
+def _build_size_constraints(rooms_to_generate: List[str]) -> str:
+    """
+    根据待生成房间列表，动态构建最小尺寸约束文本。
+    只列出与本次生成有关的房间类型，避免冗余。
+    """
+    seen_types = set()
+    lines = []
+    for room in rooms_to_generate:
+        rt = _room_type(room)
+        if rt in _ROOM_SIZE_SPEC and rt not in seen_types:
+            seen_types.add(rt)
+            spec = _ROOM_SIZE_SPEC[rt]
+            lines.append(f"{rt}: 短边≥{spec['w']}mm, 长边≥{spec['l']}mm")
+    return "；".join(lines)
+
+
 def build_query(
     house_type: str,
     floor_type: str,
@@ -840,24 +923,19 @@ def build_query(
     prompts_config: Dict = None
 ) -> str:
     """
-    构建查询文本（增强版，可注入设计约束）
+    构建查询文本（增强版，注入量化约束）
     
-    Args:
-        house_type: 住宅类型（城市/乡村）
-        floor_type: 楼层类型（一层/二层等）
-        existing_params: 已有参数
-        rooms_to_generate: 待生成的房间列表
-        design_constraints: 设计约束文本（可选，默认从配置加载）
-        prompts_config: 提示词配置字典（可选）
-        
-    Returns:
-        查询文本
+    策略：保留与训练数据完全一致的主体格式（模型从这个模式中学会
+    了 JSON 输出），在末尾追加简短的量化硬约束，用自然语言写，
+    不破坏训练模式。
     """
     existing_json = json.dumps(existing_params, ensure_ascii=False)
     rooms_json = json.dumps(rooms_to_generate, ensure_ascii=False)
     
-    # 与训练数据完全一致的提示词格式
-    # 训练时的 prompt 没有额外设计约束，保持一致可大幅降低解析失败率
+    # 从 existing_params 解析边界范围
+    boundary = existing_params.get("边界", None)
+    
+    # ---- 主体：与训练数据格式完全一致 ----
     query = (
         f'请根据这张图片中已有的户型信息以及对应的参数，帮我生成其余房间的参数，'
         f'得到一个完整的合理平面布局。构成户型的所有空间单元均表示为矩形，'
@@ -868,6 +946,26 @@ def build_query(
         f'其余待生成的"{floor_type}"房间的名称为：\n'
         f'```json\n{rooms_json}```'
     )
+    
+    # ---- 追加：简短量化约束（自然语言，不影响 JSON 输出格式） ----
+    constraints = []
+    if boundary and len(boundary) == 4:
+        bx, by, bw, bh = boundary
+        constraints.append(
+            f"所有房间的x坐标≥{bx}，y坐标≥{by}，"
+            f"x+长度≤{bx+bw}，y+宽度≤{by+bh}"
+        )
+    constraints.append("任意两个房间的矩形区域不能重叠")
+    
+    size_text = _build_size_constraints(rooms_to_generate)
+    if size_text:
+        constraints.append(f"最小尺寸要求：{size_text}")
+    
+    constraints.append("厨房不宜与卫生间直接相邻")
+    constraints.append("客厅、卧室应靠近采光面")
+    
+    query += "\n注意：" + "；".join(constraints) + "。"
+    query += "\n请直接输出JSON，格式为```json\n{...}\n```"
     
     return query
 
