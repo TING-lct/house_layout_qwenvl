@@ -685,15 +685,18 @@ class LayoutPredictor:
                         cur = self.rule_engine.aggressive_post_process(
                             cur, existing_layout
                         )
-                        # 重新评分
+                        # 重新评分 + 重新校验规则
                         new_eval = self.evaluator.evaluate(
+                            cur, existing_layout
+                        )
+                        new_validation = self.rule_engine.validate(
                             cur, existing_layout
                         )
                         if new_eval.total_score >= c['score']:
                             c['layout'] = cur
                             c['score'] = new_eval.total_score
                             c['evaluation'] = new_eval
-                            c['is_rule_valid'] = fix_result.valid
+                            c['is_rule_valid'] = new_validation.valid
                     except Exception as e:
                         print(f"    候选{c['index']+1} 修复异常: {e}")
             
@@ -729,10 +732,15 @@ class LayoutPredictor:
                 print(f"  ✅ 达到满意阈值 ({score_threshold}), 停止优化")
                 break
             
-            # 检查收敛
+            # 检查收敛（仅在无剩余问题时允许因改进不足停止）
+            has_issues = bool(best_eval and best_eval.issues)
             if iteration > 0 and iter_info.get('improvement', 0) < improvement_threshold:
-                print(f"  📉 改进幅度不足 ({iter_info.get('improvement', 0):.1f} < {improvement_threshold}), 停止优化")
-                break
+                if not has_issues:
+                    print(f"  📉 改进幅度不足且无剩余问题, 停止优化")
+                    break
+                else:
+                    print(f"  📉 改进幅度不足 ({iter_info.get('improvement', 0):.1f}), "
+                          f"但仍有 {len(best_eval.issues)} 个问题, 继续迭代")
             
             # ========== 第7步：构造修正Prompt ==========
             if iteration < max_iterations - 1 and round_eval.issues:
@@ -895,7 +903,7 @@ _ROOM_SIZE_SPEC = {
     "厨房":   {"w": 1800, "l": 2400, "a": 4.32},
     "卫生间": {"w": 1500, "l": 2100, "a": 3.15},
     "主卫":   {"w": 1800, "l": 2400, "a": 4.32},
-    "餐厅":   {"w": 2400, "l": 3000, "a": 7.2},
+    "餐厅":   {"w": 1500, "l": 2000, "a": 3.0},
 }
 
 def _room_type(name: str) -> str:

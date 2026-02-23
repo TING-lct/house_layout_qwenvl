@@ -45,7 +45,7 @@ class LayoutRuleEngine:
             "客厅": {"min_width": 3300, "min_length": 4500, "min_area": 14850000},
             "厨房": {"min_width": 1800, "min_length": 2400, "min_area": 4320000},
             "卫生间": {"min_width": 1500, "min_length": 2100, "min_area": 3150000},
-            "餐厅": {"min_width": 2400, "min_length": 3000, "min_area": 7200000},
+            "餐厅": {"min_width": 1500, "min_length": 2000, "min_area": 3000000},
         })
         
         # 相邻规则
@@ -614,30 +614,36 @@ class LayoutRuleEngine:
             origin_cy = saved[1] + saved[3] // 2
             best_dist = float('inf')
 
-            for dx_step in range(-5, 6):
-                for dy_step in range(-5, 6):
-                    nx = saved[0] + dx_step * 300
-                    ny = saved[1] + dy_step * 300
-                    test = [nx, ny, target_w, target_h]
-                    # 边界约束
-                    if boundary:
-                        if nx < boundary.x:
-                            test[0] = boundary.x
-                        if ny < boundary.y:
-                            test[1] = boundary.y
-                        if test[0] + target_w > boundary.x2:
-                            test[0] = boundary.x2 - target_w
-                        if test[1] + target_h > boundary.y2:
-                            test[1] = boundary.y2 - target_h
-                        if test[0] < boundary.x or test[1] < boundary.y:
-                            continue
-                    if not self._would_overlap(name, test, fixed, combined_base):
-                        cx = test[0] + target_w // 2
-                        cy = test[1] + target_h // 2
-                        dist = (cx - origin_cx) ** 2 + (cy - origin_cy) ** 2
-                        if dist < best_dist:
-                            best_dist = dist
-                            best = test[:]
+            # 尝试两种朝向: 原始 + 旋转90度
+            orientations = [(target_w, target_h)]
+            if target_w != target_h:
+                orientations.append((target_h, target_w))
+
+            for tw, th in orientations:
+                for dx_step in range(-10, 11):
+                    for dy_step in range(-10, 11):
+                        nx = saved[0] + dx_step * 300
+                        ny = saved[1] + dy_step * 300
+                        test = [nx, ny, tw, th]
+                        # 边界约束
+                        if boundary:
+                            if nx < boundary.x:
+                                test[0] = boundary.x
+                            if ny < boundary.y:
+                                test[1] = boundary.y
+                            if test[0] + tw > boundary.x2:
+                                test[0] = boundary.x2 - tw
+                            if test[1] + th > boundary.y2:
+                                test[1] = boundary.y2 - th
+                            if test[0] < boundary.x or test[1] < boundary.y:
+                                continue
+                        if not self._would_overlap(name, test, fixed, combined_base):
+                            cx = test[0] + tw // 2
+                            cy = test[1] + th // 2
+                            dist = (cx - origin_cx) ** 2 + (cy - origin_cy) ** 2
+                            if dist < best_dist:
+                                best_dist = dist
+                                best = test[:]
 
             if best:
                 params[:] = best

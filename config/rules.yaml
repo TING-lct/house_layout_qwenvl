@@ -39,9 +39,9 @@ space_constraints:
     max_area: 12000000  # 12平方米
   
   餐厅:
-    min_width: 2400
-    min_length: 3000
-    min_area: 7200000  # 7.2平方米
+    min_width: 1500
+    min_length: 2000
+    min_area: 3000000  # 3.0平方米
     max_area: 20000000  # 20平方米
   
   储藏:
