@@ -681,6 +681,10 @@ class LayoutPredictor:
                         cur = self.rule_engine.optimize_dimensions(
                             cur, existing_layout
                         )
+                        # 激进后处理：边界吸附 + 相邻修复 + 带重定位尺寸优化
+                        cur = self.rule_engine.aggressive_post_process(
+                            cur, existing_layout
+                        )
                         # 重新评分
                         new_eval = self.evaluator.evaluate(
                             cur, existing_layout
@@ -753,13 +757,17 @@ class LayoutPredictor:
                 iteration_history=history
             )
         
-        # 最终规则修复 + 尺寸优化
+        # 最终规则修复 + 尺寸优化 + 激进后处理
         if auto_fix:
             final_fix = self.rule_engine.validate_and_fix(best_layout, existing_layout)
             if final_fix.fixed_layout:
                 best_layout = final_fix.fixed_layout
             best_layout = self.rule_engine.optimize_dimensions(
                 best_layout, existing_layout
+            )
+            # 激进后处理：反复执行 修复→尺寸优化(含重定位)→相邻修复→边界吸附
+            best_layout = self.rule_engine.aggressive_post_process(
+                best_layout, existing_layout, max_passes=5
             )
             best_eval = self.evaluator.evaluate(best_layout, existing_layout)
         

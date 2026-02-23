@@ -232,7 +232,7 @@ def run_generation(
         score_threshold=score_threshold,
         max_iterations=max_iterations,
         auto_fix=True,
-        improvement_threshold=3.0
+        improvement_threshold=1.0
     )
     
     # ========== 第4步：输出结果 ==========
@@ -359,8 +359,8 @@ if __name__ == "__main__":
         help=f"测试用例名称，可选: {list(TEST_CASES.keys())}"
     )
     parser.add_argument("--candidates", type=int, default=5, help="每轮候选数 (默认5)")
-    parser.add_argument("--threshold", type=float, default=80.0, help="满意分数阈值 (默认80)")
-    parser.add_argument("--iterations", type=int, default=3, help="最大迭代轮数 (默认3)")
+    parser.add_argument("--threshold", type=float, default=95.0, help="满意分数阈值 (默认95)")
+    parser.add_argument("--iterations", type=int, default=5, help="最大迭代轮数 (默认5)")
     parser.add_argument("--model", type=str, default=None, help="基座模型路径 (默认自动查找)")
     parser.add_argument("--output", type=str, default="output", help="输出目录")
     parser.add_argument("--batch", action="store_true", help="批量运行所有测试用例")

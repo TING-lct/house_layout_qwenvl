@@ -390,7 +390,303 @@ class LayoutRuleEngine:
             if test.overlaps(other):
                 return True
         return False
-    
+
+    # ==================== 边界吸附 ====================
+
+    def snap_to_boundary(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None,
+        snap_threshold: int = 600
+    ) -> Dict[str, List[int]]:
+        """
+        将靠近边界的房间吸附到边界边缘。
+        对每个房间的四条边，如果与边界对应边的间隙 ≤ snap_threshold，
+        则将该边贴紧边界，同时避免引入新重叠。
+
+        Args:
+            layout: 生成的布局
+            full_layout: 完整布局（含边界）
+            snap_threshold: 吸附距离阈值(mm)，默认600mm
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **layout})
+        if not boundary:
+            return fixed
+
+        skip_names = {'边界'}
+        skip_prefixes = ('采光', '南采光', '北采光', '东采光', '西采光', '黑体', '主入口')
+
+        bx1, by1 = boundary.x, boundary.y
+        bx2, by2 = boundary.x2, boundary.y2
+
+        for name in list(fixed.keys()):
+            if name in skip_names or any(name.startswith(p) for p in skip_prefixes):
+                continue
+            params = fixed[name]
+            if len(params) != 4:
+                continue
+
+            saved = params[:]
+            changed = False
+
+            # 左边吸附
+            gap_left = params[0] - bx1
+            if 0 < gap_left <= snap_threshold:
+                params[0] = bx1
+                changed = True
+
+            # 上边吸附 (y轴)
+            gap_top = params[1] - by1
+            if 0 < gap_top <= snap_threshold:
+                params[1] = by1
+                changed = True
+
+            # 右边吸附
+            room_right = params[0] + params[2]
+            gap_right = bx2 - room_right
+            if 0 < gap_right <= snap_threshold:
+                params[0] = bx2 - params[2]
+                changed = True
+
+            # 下边吸附
+            room_bottom = params[1] + params[3]
+            gap_bottom = by2 - room_bottom
+            if 0 < gap_bottom <= snap_threshold:
+                params[1] = by2 - params[3]
+                changed = True
+
+            # 检查吸附后是否产生重叠，若有则回退
+            if changed and self._would_overlap(name, params, fixed, combined_base):
+                params[:] = saved
+
+        return fixed
+
+    # ==================== 禁止相邻修复 ====================
+
+    def fix_forbidden_adjacency(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None
+    ) -> Dict[str, List[int]]:
+        """
+        修复禁止相邻的房间对：通过移动较小的房间使其不再相邻。
+        尝试8个方向（上下左右 + 对角），递增步长，
+        选择第一个既不相邻、不重叠、也不超边界的位移。
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **fixed})
+
+        forbidden_pairs = self.adjacency_rules.get('forbidden_pairs', [])
+        if not forbidden_pairs:
+            return fixed
+
+        # 解析当前所有普通房间
+        all_combined = {**combined_base, **fixed}
+        rooms_list, _, _ = self.parse_layout(all_combined)
+
+        # 收集需要修复的对
+        pairs_to_fix = []
+        for i, r1 in enumerate(rooms_list):
+            for r2 in rooms_list[i + 1:]:
+                t1 = self._get_room_type(r1.name)
+                t2 = self._get_room_type(r2.name)
+                for pair in forbidden_pairs:
+                    if (t1 == pair[0] and t2 == pair[1]) or \
+                       (t1 == pair[1] and t2 == pair[0]):
+                        if r1.is_adjacent(r2):
+                            pairs_to_fix.append((r1, r2))
+                        break
+
+        for r1, r2 in pairs_to_fix:
+            # 移动面积更小的房间；如果它不在 fixed 里（属于 existing），跳过
+            move_name = r2.name if r2.area <= r1.area else r1.name
+            other_name = r1.name if move_name == r2.name else r2.name
+
+            if move_name not in fixed:
+                # 尝试移动另一个
+                move_name, other_name = other_name, move_name
+            if move_name not in fixed:
+                continue
+
+            params = fixed[move_name]
+            other_p = fixed.get(other_name) or combined_base.get(other_name)
+            if not other_p or len(other_p) != 4:
+                continue
+
+            saved = params[:]
+            moved = False
+
+            # 8个方向，步长递增
+            directions = [
+                (1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1)
+            ]
+            for step in (300, 500, 800, 1200):
+                if moved:
+                    break
+                for dx, dy in directions:
+                    test_params = [
+                        params[0] + dx * step,
+                        params[1] + dy * step,
+                        params[2], params[3]
+                    ]
+                    # 边界检查
+                    if boundary:
+                        if test_params[0] < boundary.x or test_params[1] < boundary.y:
+                            continue
+                        if test_params[0] + test_params[2] > boundary.x2:
+                            continue
+                        if test_params[1] + test_params[3] > boundary.y2:
+                            continue
+                    # 重叠检查
+                    if self._would_overlap(move_name, test_params, fixed, combined_base):
+                        continue
+                    # 相邻检查
+                    test_room = Room(name=move_name, x=test_params[0],
+                                    y=test_params[1], width=test_params[2],
+                                    height=test_params[3])
+                    other_room = Room(name=other_name, x=other_p[0],
+                                     y=other_p[1], width=other_p[2],
+                                     height=other_p[3])
+                    if not test_room.is_adjacent(other_room):
+                        params[:] = test_params
+                        moved = True
+                        break
+
+            if not moved:
+                params[:] = saved
+
+        return fixed
+
+    # ==================== 带重定位的尺寸优化 ====================
+
+    def optimize_dimensions_with_reposition(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None
+    ) -> Dict[str, List[int]]:
+        """
+        增强版尺寸优化：先尝试原地扩大（同 optimize_dimensions），
+        若因重叠失败，再尝试在边界范围内搜索新位置放置扩大后的房间。
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **layout})
+
+        for name in list(fixed.keys()):
+            room_type = self._get_room_type(name)
+            if room_type not in self.space_constraints:
+                continue
+
+            constraints = self.space_constraints[room_type]
+            min_w = constraints.get('min_width', 0)
+            min_l = constraints.get('min_length', 0)
+            params = fixed[name]
+
+            short_side = min(params[2], params[3])
+            long_side = max(params[2], params[3])
+            needs_fix = short_side < min_w or long_side < min_l
+            if not needs_fix:
+                continue
+
+            # ---- 计算目标尺寸 ----
+            if params[2] <= params[3]:
+                target_w = max(params[2], min_w)
+                target_h = max(params[3], min_l)
+            else:
+                target_w = max(params[2], min_l)
+                target_h = max(params[3], min_w)
+
+            # ---- 尝试1：原地扩大 ----
+            saved = params[:]
+            params[2], params[3] = target_w, target_h
+            self._clamp_boundary(params, boundary)
+            if not self._would_overlap(name, params, fixed, combined_base):
+                continue  # 成功
+
+            # ---- 尝试2：搜索附近位置放置扩大后的房间 ----
+            params[:] = saved
+            best = None
+            origin_cx = saved[0] + saved[2] // 2
+            origin_cy = saved[1] + saved[3] // 2
+            best_dist = float('inf')
+
+            for dx_step in range(-5, 6):
+                for dy_step in range(-5, 6):
+                    nx = saved[0] + dx_step * 300
+                    ny = saved[1] + dy_step * 300
+                    test = [nx, ny, target_w, target_h]
+                    # 边界约束
+                    if boundary:
+                        if nx < boundary.x:
+                            test[0] = boundary.x
+                        if ny < boundary.y:
+                            test[1] = boundary.y
+                        if test[0] + target_w > boundary.x2:
+                            test[0] = boundary.x2 - target_w
+                        if test[1] + target_h > boundary.y2:
+                            test[1] = boundary.y2 - target_h
+                        if test[0] < boundary.x or test[1] < boundary.y:
+                            continue
+                    if not self._would_overlap(name, test, fixed, combined_base):
+                        cx = test[0] + target_w // 2
+                        cy = test[1] + target_h // 2
+                        dist = (cx - origin_cx) ** 2 + (cy - origin_cy) ** 2
+                        if dist < best_dist:
+                            best_dist = dist
+                            best = test[:]
+
+            if best:
+                params[:] = best
+
+        return fixed
+
+    # ==================== 激进后处理（组合所有修复） ====================
+
+    def aggressive_post_process(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None,
+        max_passes: int = 3
+    ) -> Dict[str, List[int]]:
+        """
+        激进后处理：反复执行 修复 → 尺寸优化 → 相邻修复 → 边界吸附，
+        直到没有改进或达到最大遍历次数。
+
+        调用顺序（每遍）：
+        1. validate_and_fix  — 解决重叠、超界等硬性问题
+        2. optimize_dimensions_with_reposition — 扩大不足房间（含重定位）
+        3. fix_forbidden_adjacency — 拉开禁止相邻的房间
+        4. snap_to_boundary — 吸附到边界
+        """
+        current = {k: v.copy() for k, v in layout.items()}
+
+        for pass_idx in range(max_passes):
+            before = {k: v[:] for k, v in current.items()}
+
+            # 1. 硬性规则修复
+            fix_result = self.validate_and_fix(current, full_layout)
+            if fix_result.fixed_layout:
+                current = fix_result.fixed_layout
+
+            # 2. 带重定位的尺寸优化
+            current = self.optimize_dimensions_with_reposition(current, full_layout)
+
+            # 3. 禁止相邻修复
+            current = self.fix_forbidden_adjacency(current, full_layout)
+
+            # 4. 边界吸附
+            current = self.snap_to_boundary(current, full_layout)
+
+            # 检查是否有变化，无变化则提前终止
+            if all(current.get(k) == before.get(k) for k in set(current) | set(before)):
+                break
+
+        return current
+
     def _get_room_type(self, room_name: str) -> str:
         """从房间名获取房间类型"""
         type_mappings = {
