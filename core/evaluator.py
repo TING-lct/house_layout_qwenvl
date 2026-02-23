@@ -422,8 +422,7 @@ class LayoutEvaluator:
                 
                 # 检查是否为禁止相邻的组合
                 for pair in forbidden_pairs:
-                    if (type1 in pair and type2 in pair) or \
-                       (type1 == pair[0] and type2 == pair[1]) or \
+                    if (type1 == pair[0] and type2 == pair[1]) or \
                        (type1 == pair[1] and type2 == pair[0]):
                         if room1.is_adjacent(room2):
                             score -= self.penalties.get('forbidden_adjacent', 15)

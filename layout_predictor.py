@@ -665,11 +665,35 @@ class LayoutPredictor:
                 history.append(iter_info)
                 continue
             
-            # ========== 第3步：选择最优候选 ==========
-            # 优先选择通过硬性规则验证的
-            valid_candidates = [c for c in candidate_details if c['is_rule_valid']]
-            pool = valid_candidates if valid_candidates else candidate_details
-            round_best = max(pool, key=lambda x: x['score'])
+            # ========== 第3步：修复所有候选 + 尺寸优化 + 选最优 ==========
+            if auto_fix:
+                print(f"  🔧 修复并优化所有候选...")
+                for c in candidate_details:
+                    try:
+                        cur = c['layout']
+                        # 规则修复（重叠、超界等硬性问题）
+                        fix_result = self.rule_engine.validate_and_fix(
+                            cur, existing_layout
+                        )
+                        if fix_result.fixed_layout:
+                            cur = fix_result.fixed_layout
+                        # 尺寸优化（满足100%最小标准，不引入新重叠）
+                        cur = self.rule_engine.optimize_dimensions(
+                            cur, existing_layout
+                        )
+                        # 重新评分
+                        new_eval = self.evaluator.evaluate(
+                            cur, existing_layout
+                        )
+                        if new_eval.total_score >= c['score']:
+                            c['layout'] = cur
+                            c['score'] = new_eval.total_score
+                            c['evaluation'] = new_eval
+                            c['is_rule_valid'] = fix_result.valid
+                    except Exception as e:
+                        print(f"    候选{c['index']+1} 修复异常: {e}")
+            
+            round_best = max(candidate_details, key=lambda x: x['score'])
             
             print(f"  🏆 本轮最优: 候选{round_best['index']+1}, "
                   f"得分={round_best['score']:.1f}")
@@ -677,23 +701,9 @@ class LayoutPredictor:
             iter_info['best_score'] = round_best['score']
             iter_info['issues'] = round_best['evaluation'].issues
             
-            # ========== 第4步：规则引擎修复 ==========
             round_layout = round_best['layout']
             round_raw = round_best['raw_output']
             round_eval = round_best['evaluation']
-            
-            if auto_fix and not round_best['is_rule_valid']:
-                print(f"  🔧 规则引擎修复中...")
-                fix_result = self.rule_engine.validate_and_fix(
-                    round_layout, existing_layout
-                )
-                if fix_result.fixed_layout:
-                    round_layout = fix_result.fixed_layout
-                    round_eval = self.evaluator.evaluate(
-                        round_layout, existing_layout
-                    )
-                    print(f"    修复后得分: {round_eval.total_score:.1f}")
-                    iter_info['fixed_score'] = round_eval.total_score
             
             # ========== 第5步：更新全局最优 ==========
             if round_eval.total_score > best_score:
@@ -743,12 +753,15 @@ class LayoutPredictor:
                 iteration_history=history
             )
         
-        # 最终规则修复
+        # 最终规则修复 + 尺寸优化
         if auto_fix:
             final_fix = self.rule_engine.validate_and_fix(best_layout, existing_layout)
             if final_fix.fixed_layout:
                 best_layout = final_fix.fixed_layout
-                best_eval = self.evaluator.evaluate(best_layout, existing_layout)
+            best_layout = self.rule_engine.optimize_dimensions(
+                best_layout, existing_layout
+            )
+            best_eval = self.evaluator.evaluate(best_layout, existing_layout)
         
         print(f"\n{'='*50}")
         print(f"🎯 优化完成!")

@@ -315,6 +315,82 @@ class LayoutRuleEngine:
         
         return layout
     
+    def optimize_dimensions(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None
+    ) -> Dict[str, List[int]]:
+        """
+        保守优化房间尺寸：仅在不产生新重叠的前提下扩大房间，
+        使其满足评分器的100%最小尺寸标准（硬性规则仅用80%容差）。
+        每次修正后独立检查重叠，若冲突则回退该次修正。
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **layout})
+        
+        for name in list(fixed.keys()):
+            room_type = self._get_room_type(name)
+            if room_type not in self.space_constraints:
+                continue
+            
+            constraints = self.space_constraints[room_type]
+            min_w = constraints.get('min_width', 0)
+            min_l = constraints.get('min_length', 0)
+            params = fixed[name]
+            
+            # --- 短边修正 ---
+            if min(params[2], params[3]) < min_w:
+                saved = params[:]
+                if params[2] <= params[3]:
+                    params[2] = min_w
+                else:
+                    params[3] = min_w
+                self._clamp_boundary(params, boundary)
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[:] = saved
+            
+            # --- 长边修正 ---
+            if max(params[2], params[3]) < min_l:
+                saved = params[:]
+                if params[2] >= params[3]:
+                    params[2] = min_l
+                else:
+                    params[3] = min_l
+                self._clamp_boundary(params, boundary)
+                if self._would_overlap(name, params, fixed, combined_base):
+                    params[:] = saved
+        
+        return fixed
+    
+    @staticmethod
+    def _clamp_boundary(params: list, boundary):
+        """将房间约束在边界内"""
+        if not boundary:
+            return
+        max_x = boundary.x + boundary.width
+        max_y = boundary.y + boundary.height
+        if params[0] + params[2] > max_x:
+            params[0] = max(boundary.x, max_x - params[2])
+        if params[1] + params[3] > max_y:
+            params[1] = max(boundary.y, max_y - params[3])
+    
+    @staticmethod
+    def _would_overlap(name, params, layout, base_layout):
+        """检查修改后的房间是否与其他房间重叠"""
+        skip_prefixes = ('采光', '南采光', '北采光', '东采光', '西采光', '黑体', '主入口')
+        test = Room(name=name, x=params[0], y=params[1],
+                    width=params[2], height=params[3])
+        for n, p in {**base_layout, **layout}.items():
+            if n == name or n == '边界' or len(p) != 4:
+                continue
+            if any(n.startswith(pre) for pre in skip_prefixes):
+                continue
+            other = Room(name=n, x=p[0], y=p[1], width=p[2], height=p[3])
+            if test.overlaps(other):
+                return True
+        return False
+    
     def _get_room_type(self, room_name: str) -> str:
         """从房间名获取房间类型"""
         type_mappings = {

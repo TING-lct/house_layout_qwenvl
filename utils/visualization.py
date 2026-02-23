@@ -60,12 +60,54 @@ class LayoutVisualizer:
     
     @staticmethod
     def _setup_cjk_font() -> FontProperties:
-        """设置中文字体，同时配置 matplotlib 全局 rcParams"""
+        """设置中文字体，同时配置 matplotlib 全局 rcParams
+        
+        查找顺序：
+        1. 项目内嵌字体 (fonts/SimHei.ttf) —— 离线环境下也可用
+        2. 系统已安装的 CJK 字体
+        3. fc-list 动态搜索 (Linux)
+        4. matplotlib 已注册的 CJK 字体名称
+        5. 自动下载 Noto Sans SC（需要网络）
+        """
         import os, platform, subprocess
         from matplotlib.font_manager import FontProperties, fontManager
         
+        def _register_and_return(font_path):
+            """注册字体到 matplotlib 全局并返回 FontProperties"""
+            fp = FontProperties(fname=font_path)
+            font_name = fp.get_name()
+            
+            # 注册到 fontManager
+            if hasattr(fontManager, 'addfont'):
+                fontManager.addfont(font_path)
+            else:
+                from matplotlib.font_manager import FontEntry
+                fontManager.ttflist.append(
+                    FontEntry(fname=font_path, name=font_name)
+                )
+            
+            # 设置全局 rcParams —— 这是让 tight_layout/savefig 不 fallback 的关键
+            plt.rcParams['font.family'] = 'sans-serif'
+            sans_list = list(plt.rcParams.get('font.sans-serif', []))
+            if font_name not in sans_list:
+                sans_list.insert(0, font_name)
+            plt.rcParams['font.sans-serif'] = sans_list
+            plt.rcParams['axes.unicode_minus'] = False
+            
+            print(f"CJK 字体已加载: {font_name} ({font_path})")
+            return fp
+        
+        # ---------- 0. 项目内嵌字体（最高优先级） ----------
+        _this_dir = os.path.dirname(os.path.abspath(__file__))
+        _project_root = os.path.dirname(_this_dir)
+        bundled_font = os.path.join(_project_root, "fonts", "SimHei.ttf")
+        
         # 按优先级列出候选字体文件
         candidates = []
+        
+        # 始终最先尝试项目自带字体
+        if os.path.isfile(bundled_font):
+            candidates.append(bundled_font)
         
         if platform.system() == "Windows":
             win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
@@ -100,23 +142,12 @@ class LayoutVisualizer:
                 pass
         
         # 尝试找到可用的字体文件
-        found_path = None
         for path in candidates:
             if os.path.isfile(path):
-                found_path = path
-                break
-        
-        if found_path:
-            try:
-                fp = FontProperties(fname=found_path)
-                font_name = fp.get_name()
-                # 注册到 matplotlib 全局，确保 tight_layout/savefig 也能用
-                fontManager.addfont(found_path)
-                plt.rcParams['font.family'] = [font_name, 'sans-serif']
-                plt.rcParams['axes.unicode_minus'] = False
-                return fp
-            except Exception:
-                pass
+                try:
+                    return _register_and_return(path)
+                except Exception as e:
+                    print(f"加载字体 {path} 失败: {e}")
         
         # 尝试 matplotlib 已知的 CJK 字体名称
         for family in ['WenQuanYi Zen Hei', 'WenQuanYi Micro Hei',
@@ -124,16 +155,35 @@ class LayoutVisualizer:
                         'SimHei', 'Microsoft YaHei']:
             try:
                 fp = FontProperties(family=family)
-                # 验证字体是否真的能找到
                 from matplotlib.font_manager import findfont
                 real_path = findfont(fp)
                 if real_path and 'DejaVu' not in real_path:
-                    plt.rcParams['font.family'] = [family, 'sans-serif']
-                    plt.rcParams['axes.unicode_minus'] = False
-                    return fp
+                    return _register_and_return(real_path)
             except Exception:
                 continue
         
+        # 最后手段：自动下载 Noto Sans SC 字体到本地缓存
+        try:
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "cjk_fonts")
+            os.makedirs(cache_dir, exist_ok=True)
+            local_font = os.path.join(cache_dir, "NotoSansSC-Regular.otf")
+            
+            if not os.path.isfile(local_font):
+                import urllib.request
+                url = ("https://github.com/notofonts/noto-cjk/raw/main/"
+                       "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf")
+                print(f"正在下载 CJK 字体到 {local_font} ...")
+                urllib.request.urlretrieve(url, local_font)
+                print("CJK 字体下载完成")
+            
+            if os.path.isfile(local_font):
+                return _register_and_return(local_font)
+        except Exception as e:
+            print(f"自动下载 CJK 字体失败: {e}")
+            print("提示: 可手动运行 apt-get install -y fonts-wqy-zenhei "
+                  "然后删除 ~/.cache/matplotlib/ 重试")
+        
+        print("⚠️ 未找到任何 CJK 字体，中文将显示为方块")
         return FontProperties()
     
     def visualize(
