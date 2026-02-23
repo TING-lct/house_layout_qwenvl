@@ -444,6 +444,118 @@ class LayoutRuleEngine:
                 return True
         return False
 
+    # ==================== 空间填充扩张 ====================
+
+    def expand_rooms_to_fill(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None,
+        step: int = 300,
+        max_rounds: int = 20,
+        max_area_ratios: Dict[str, float] = None
+    ) -> Dict[str, List[int]]:
+        """
+        迭代地向四个方向扩大房间以填充边界内的空白区域。
+
+        算法：
+        每轮遍历所有房间，依次尝试向右(+w)、向下(+h)、向左(-x,+w)、向上(-y,+h)
+        各扩张 step mm。每次扩张后检查：
+          1. 不与其他房间/基础设施重叠
+          2. 不超出边界
+          3. 不超过该房间类型的最大面积限制
+        成功则保留，否则回退。重复直到没有任何扩张或达到最大轮数。
+
+        Args:
+            layout: 生成的房间布局
+            full_layout: 完整布局（含边界、采光等）
+            step: 每次扩张步长(mm)，默认300
+            max_rounds: 最大迭代轮数，默认20
+            max_area_ratios: 各房间类型的最大面积(mm²)覆盖，默认从rules.yaml读取
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **fixed})
+        if not boundary:
+            return fixed
+
+        # 读取各类型最大面积限制
+        type_max_area = {}
+        for room_type, constraints in self.space_constraints.items():
+            type_max_area[room_type] = constraints.get('max_area', float('inf'))
+
+        # 确定扩张优先级：客厅 > 卧室 > 餐厅 > 其他
+        priority_order = {"客厅": 0, "主卧": 1, "卧室": 2, "餐厅": 3,
+                          "厨房": 4, "卫生间": 5, "主卫": 5, "储藏": 6, "阳台": 7}
+
+        def _sort_key(name):
+            rt = self._get_room_type(name)
+            return priority_order.get(rt, 10)
+
+        room_names = sorted(
+            [n for n in fixed if not any(n.startswith(p) for p in
+                ('采光', '南采光', '北采光', '东采光', '西采光', '黑体', '主入口', '边界'))],
+            key=_sort_key
+        )
+
+        bx1, by1 = boundary.x, boundary.y
+        bx2, by2 = boundary.x2, boundary.y2
+
+        for round_idx in range(max_rounds):
+            any_expanded = False
+
+            for name in room_names:
+                params = fixed[name]
+                rt = self._get_room_type(name)
+                area_limit = type_max_area.get(rt, float('inf'))
+
+                # 四个方向的扩张操作：(dx, dy, dw, dh)
+                # 向右扩: width + step
+                # 向下扩: height + step
+                # 向左扩: x - step, width + step
+                # 向上扩: y - step, height + step
+                expansions = [
+                    (0, 0, step, 0),       # 右
+                    (0, 0, 0, step),       # 下
+                    (-step, 0, step, 0),   # 左
+                    (0, -step, 0, step),   # 上
+                ]
+
+                for dx, dy, dw, dh in expansions:
+                    new_params = [
+                        params[0] + dx,
+                        params[1] + dy,
+                        params[2] + dw,
+                        params[3] + dh,
+                    ]
+
+                    # 边界检查
+                    if new_params[0] < bx1 or new_params[1] < by1:
+                        continue
+                    if new_params[0] + new_params[2] > bx2:
+                        continue
+                    if new_params[1] + new_params[3] > by2:
+                        continue
+
+                    # 面积上限检查
+                    new_area = new_params[2] * new_params[3]
+                    if new_area > area_limit:
+                        continue
+
+                    # 长宽比检查（不超过4:1）
+                    ratio = max(new_params[2], new_params[3]) / max(min(new_params[2], new_params[3]), 1)
+                    if ratio > 4.0:
+                        continue
+
+                    # 重叠检查
+                    if not self._would_overlap(name, new_params, fixed, combined_base):
+                        params[:] = new_params
+                        any_expanded = True
+
+            if not any_expanded:
+                break
+
+        return fixed
+
     # ==================== 边界吸附 ====================
 
     def snap_to_boundary(
@@ -812,7 +924,7 @@ class LayoutRuleEngine:
         max_passes: int = 3
     ) -> Dict[str, List[int]]:
         """
-        激进后处理：反复执行 修复 → 尺寸优化 → 相邻修复 → 边界吸附，
+        激进后处理：反复执行 修复 → 尺寸优化 → 相邻修复 → 边界吸附 → 空间填充，
         直到没有改进或达到最大遍历次数。
 
         调用顺序（每遍）：
@@ -821,6 +933,7 @@ class LayoutRuleEngine:
         3. fix_living_room_position — 客厅远离入口时与卧室交换
         4. fix_forbidden_adjacency — 拉开禁止相邻的房间
         5. snap_to_boundary — 吸附到边界
+        6. expand_rooms_to_fill — 迭代扩张填充空白区域
         """
         current = {k: v.copy() for k, v in layout.items()}
 
@@ -843,6 +956,9 @@ class LayoutRuleEngine:
 
             # 5. 边界吸附
             current = self.snap_to_boundary(current, full_layout)
+
+            # 6. 空间填充扩张（迭代扩大房间以填充空白）
+            current = self.expand_rooms_to_fill(current, full_layout)
 
             # 检查是否有变化，无变化则提前终止
             if all(current.get(k) == before.get(k) for k in set(current) | set(before)):
