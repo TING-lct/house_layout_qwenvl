@@ -8,6 +8,8 @@ from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass
 import numpy as np
 
+from core.common import get_room_type
+
 
 @dataclass
 class MetricsResult:
@@ -22,11 +24,11 @@ class MetricsResult:
 
 class LayoutMetrics:
     """户型布局评估指标"""
-    
-    def __init__(self, space_constraints: Dict = None):
+
+    def __init__(self, space_constraints: Optional[Dict] = None):
         """
         初始化指标计算器
-        
+
         Args:
             space_constraints: 空间尺寸约束
         """
@@ -39,19 +41,19 @@ class LayoutMetrics:
             "主卫": {"min_width": 1800, "min_length": 2400, "min_area": 4320000},
             "餐厅": {"min_width": 1500, "min_length": 2000, "min_area": 3000000},
         }
-    
+
     def calculate_all(
-        self, 
+        self,
         layout: Dict[str, List[int]],
         full_layout: Dict[str, List[int]] = None
     ) -> MetricsResult:
         """
         计算所有指标
-        
+
         Args:
             layout: 生成的布局
             full_layout: 完整布局
-            
+
         Returns:
             MetricsResult: 指标结果
         """
@@ -59,17 +61,17 @@ class LayoutMetrics:
             combined = {**full_layout, **layout}
         else:
             combined = layout
-        
+
         # 解析布局
         rooms = self._parse_rooms(combined)
         boundary = self._get_boundary(combined)
-        
+
         # 计算各项指标
         space_util = self.calculate_space_utilization(rooms, boundary)
         violations = self.count_constraint_violations(rooms, boundary)
         geo_validity = self.calculate_geometric_validity(rooms, boundary)
         dim_compliance = self.calculate_dimension_compliance(rooms)
-        
+
         # 综合得分
         overall = (
             space_util * 0.2 +
@@ -77,7 +79,7 @@ class LayoutMetrics:
             geo_validity * 0.3 +
             dim_compliance * 0.2
         )
-        
+
         return MetricsResult(
             space_utilization=space_util,
             constraint_violations=violations,
@@ -89,21 +91,21 @@ class LayoutMetrics:
                 'boundary': boundary
             }
         )
-    
+
     def _parse_rooms(
-        self, 
+        self,
         layout: Dict[str, List[int]]
     ) -> List[Dict[str, Any]]:
         """解析房间列表"""
         rooms = []
-        
+
         for name, params in layout.items():
             if len(params) != 4:
                 continue
-            
+
             if name in ['边界'] or '采光' in name or '黑体' in name or '入口' in name:
                 continue
-            
+
             rooms.append({
                 'name': name,
                 'x': params[0],
@@ -112,11 +114,11 @@ class LayoutMetrics:
                 'height': params[3],
                 'area': params[2] * params[3]
             })
-        
+
         return rooms
-    
+
     def _get_boundary(
-        self, 
+        self,
         layout: Dict[str, List[int]]
     ) -> Optional[Dict[str, int]]:
         """获取边界信息"""
@@ -130,7 +132,7 @@ class LayoutMetrics:
                 'area': boundary[2] * boundary[3]
             }
         return None
-    
+
     def calculate_space_utilization(
         self,
         rooms: List[Dict[str, Any]],
@@ -138,25 +140,25 @@ class LayoutMetrics:
     ) -> float:
         """
         计算空间利用率
-        
+
         Args:
             rooms: 房间列表
             boundary: 边界信息
-            
+
         Returns:
             float: 空间利用率 (0-100)
         """
         if not boundary:
             return 50.0  # 无边界信息时返回中等分数
-        
+
         total_room_area = sum(room['area'] for room in rooms)
         boundary_area = boundary['area']
-        
+
         if boundary_area == 0:
             return 0.0
-        
+
         utilization = (total_room_area / boundary_area) * 100
-        
+
         # 归一化到合理范围（一般利用率在60%-90%之间较好）
         if utilization > 100:
             # 超出边界，可能有重叠
@@ -165,7 +167,7 @@ class LayoutMetrics:
             return utilization * 1.5  # 利用率低，适当惩罚
         else:
             return min(100, utilization * 1.1)  # 正常范围
-    
+
     def count_constraint_violations(
         self,
         rooms: List[Dict[str, Any]],
@@ -173,49 +175,49 @@ class LayoutMetrics:
     ) -> int:
         """
         计算约束违反数
-        
+
         Args:
             rooms: 房间列表
             boundary: 边界信息
-            
+
         Returns:
             int: 违反数量
         """
         violations = 0
-        
+
         # 检查房间重叠
         for i, room1 in enumerate(rooms):
             for room2 in rooms[i+1:]:
                 if self._check_overlap(room1, room2):
                     violations += 1
-        
+
         # 检查边界
         if boundary:
             for room in rooms:
                 if not self._within_boundary(room, boundary):
                     violations += 1
-        
+
         # 检查尺寸
         for room in rooms:
             room_type = self._get_room_type(room['name'])
             if room_type in self.space_constraints:
                 constraints = self.space_constraints[room_type]
-                
+
                 width = min(room['width'], room['height'])
                 length = max(room['width'], room['height'])
-                
+
                 if width < constraints.get('min_width', 0):
                     violations += 1
                 if length < constraints.get('min_length', 0):
                     violations += 1
                 if room['area'] < constraints.get('min_area', 0):
                     violations += 1
-        
+
         return violations
-    
+
     def _check_overlap(
-        self, 
-        room1: Dict[str, Any], 
+        self,
+        room1: Dict[str, Any],
         room2: Dict[str, Any]
     ) -> bool:
         """检查两个房间是否重叠"""
@@ -225,7 +227,7 @@ class LayoutMetrics:
             room1['y'] + room1['height'] <= room2['y'] or
             room2['y'] + room2['height'] <= room1['y']
         )
-    
+
     def _within_boundary(
         self,
         room: Dict[str, Any],
@@ -238,7 +240,7 @@ class LayoutMetrics:
             room['x'] + room['width'] <= boundary['x'] + boundary['width'] and
             room['y'] + room['height'] <= boundary['y'] + boundary['height']
         )
-    
+
     def calculate_geometric_validity(
         self,
         rooms: List[Dict[str, Any]],
@@ -246,112 +248,96 @@ class LayoutMetrics:
     ) -> float:
         """
         计算几何合法性得分
-        
+
         Args:
             rooms: 房间列表
             boundary: 边界信息
-            
+
         Returns:
             float: 合法性得分 (0-100)
         """
         if not rooms:
             return 0.0
-        
+
         total_score = 0.0
-        
+
         for room in rooms:
             room_score = 100.0
-            
+
             # 检查尺寸有效性
             if room['width'] <= 0 or room['height'] <= 0:
                 room_score = 0.0
             else:
                 # 检查长宽比
-                ratio = max(room['width'], room['height']) / min(room['width'], room['height'])
+                ratio = max(room['width'], room['height']) / \
+                    min(room['width'], room['height'])
                 if ratio > 5:
                     room_score -= 30
                 elif ratio > 3:
                     room_score -= 10
-                
+
                 # 检查面积合理性
                 area_m2 = room['area'] / 1000000
                 if area_m2 < 2:
                     room_score -= 20
                 elif area_m2 > 100:
                     room_score -= 20
-            
+
             # 检查边界
             if boundary and not self._within_boundary(room, boundary):
                 room_score -= 30
-            
+
             total_score += max(0, room_score)
-        
+
         return total_score / len(rooms)
-    
+
     def calculate_dimension_compliance(
         self,
         rooms: List[Dict[str, Any]]
     ) -> float:
         """
         计算尺寸合规率
-        
+
         Args:
             rooms: 房间列表
-            
+
         Returns:
             float: 合规率 (0-100)
         """
         if not rooms:
             return 0.0
-        
+
         compliant_count = 0
         checked_count = 0
-        
+
         for room in rooms:
             room_type = self._get_room_type(room['name'])
-            
+
             if room_type in self.space_constraints:
                 checked_count += 1
                 constraints = self.space_constraints[room_type]
-                
+
                 width = min(room['width'], room['height'])
                 length = max(room['width'], room['height'])
-                
+
                 is_compliant = (
                     width >= constraints.get('min_width', 0) and
                     length >= constraints.get('min_length', 0) and
                     room['area'] >= constraints.get('min_area', 0)
                 )
-                
+
                 if is_compliant:
                     compliant_count += 1
-        
+
         if checked_count == 0:
             return 100.0  # 没有需要检查的房间
-        
+
         return (compliant_count / checked_count) * 100
-    
-    def _get_room_type(self, room_name: str) -> str:
-        """从房间名获取房间类型"""
-        type_mappings = {
-            "卧室": ["卧室", "卧室1", "卧室2", "卧室3", "卧室4", "次卧"],
-            "主卧": ["主卧"],
-            "客厅": ["客厅"],
-            "厨房": ["厨房"],
-            "卫生间": ["卫生间", "公卫", "次卫"],
-            "主卫": ["主卫"],
-            "餐厅": ["餐厅"],
-        }
-        
-        for room_type, names in type_mappings.items():
-            if room_name in names:
-                return room_type
-        
-        for room_type in type_mappings.keys():
-            if room_type in room_name:
-                return room_type
-        
-        return room_name
+
+    @staticmethod
+    def _get_room_type(room_name: str) -> str:
+        """从房间名获取房间类型（委托给 common.get_room_type）"""
+        return get_room_type(room_name)
 
 
 def compare_layouts(
@@ -361,20 +347,20 @@ def compare_layouts(
 ) -> Dict[str, Any]:
     """
     比较两个布局的指标
-    
+
     Args:
         layout1: 布局1
         layout2: 布局2
         full_layout: 完整布局（包括已有房间）
-        
+
     Returns:
         Dict: 比较结果
     """
     metrics = LayoutMetrics()
-    
+
     result1 = metrics.calculate_all(layout1, full_layout)
     result2 = metrics.calculate_all(layout2, full_layout)
-    
+
     return {
         'layout1': {
             'space_utilization': result1.space_utilization,

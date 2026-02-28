@@ -148,3 +148,22 @@ penalty_scores:
   forbidden_adjacent: 15
   no_lighting: 10
   bad_traffic: 10
+
+# 网格对齐配置
+grid_alignment:
+  grid_size: 300  # mm，建筑模数
+  enable: true
+
+# 空间填充扩张配置
+expansion:
+  step: 300  # mm，每次扩张步长
+  max_rounds: 20
+  max_aspect_ratio: 4.0  # 最大长宽比
+
+# 后处理配置
+post_processing:
+  max_passes: 5  # 激进后处理最大轮数
+  snap_threshold: 1800  # mm，边界吸附距离阈值
+  enable_grid_snap: true
+  enable_boundary_snap: true
+  enable_space_fill: true

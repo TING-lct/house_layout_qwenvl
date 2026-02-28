@@ -29,9 +29,11 @@ generation:
 # 评估参数
 evaluation:
   # 分数阈值
-  score_threshold: 85
+  score_threshold: 80
   # 最大迭代次数
-  max_iterations: 3
+  max_iterations: 5
+  # 改进阈值（低于此值视为收敛）
+  improvement_threshold: 1.0
   # 评估权重
   weights:
     空间合理性: 0.25
@@ -73,8 +75,8 @@ training:
 # 优化器配置
 optimizer:
   # 迭代优化
-  max_iterations: 3
-  improvement_threshold: 5  # 分数提升阈值
+  max_iterations: 5
+  improvement_threshold: 1.0  # 分数提升阈值（降低以允许更多迭代）
   
   # 规则引擎
   enable_auto_fix: true

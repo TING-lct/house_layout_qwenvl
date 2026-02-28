@@ -9,8 +9,6 @@ accelerate>=0.25.0
 # Qwen-VL依赖
 qwen_vl_utils
 
-# RAG相关
-sentence-transformers>=2.2.0
 numpy>=1.24.0
 
 # API服务

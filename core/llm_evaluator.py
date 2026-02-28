@@ -4,11 +4,16 @@ LLM布局评估器模块
 """
 
 import json
+import logging
 import yaml
 import re
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
+
+from .common import extract_json_from_text
+
+logger = logging.getLogger(__name__)
 
 # 延迟导入GPU相关模块
 torch = None
@@ -20,19 +25,19 @@ PeftModel = None
 def _ensure_llm_imports():
     """确保LLM相关模块已导入"""
     global torch, AutoModelForCausalLM, AutoTokenizer, PeftModel
-    
+
     if torch is None:
         import torch as _torch
         torch = _torch
-    
+
     if AutoModelForCausalLM is None:
         from transformers import AutoModelForCausalLM as _AutoModelForCausalLM
         AutoModelForCausalLM = _AutoModelForCausalLM
-    
+
     if AutoTokenizer is None:
         from transformers import AutoTokenizer as _AutoTokenizer
         AutoTokenizer = _AutoTokenizer
-    
+
     if PeftModel is None:
         from peft import PeftModel as _PeftModel
         PeftModel = _PeftModel
@@ -118,18 +123,18 @@ DEFAULT_EVALUATION_PROMPT = """你是一位专业的建筑设计师，请评估�
 
 class LLMLayoutEvaluator:
     """基于LLM的户型布局评估器"""
-    
+
     def __init__(
         self,
         model_path: str,
-        adapter_path: str = None,
+        adapter_path: Optional[str] = None,
         device: str = "cuda",
-        prompt_config_path: str = None,
+        prompt_config_path: Optional[str] = None,
         use_flash_attention: bool = False
     ):
         """
         初始化LLM评估器
-        
+
         Args:
             model_path: 基座模型路径 (如 Qwen2.5-14B-Instruct)
             adapter_path: LoRA适配器路径（可选，用于使用微调后的模型）
@@ -138,14 +143,14 @@ class LLMLayoutEvaluator:
             use_flash_attention: 是否使用Flash Attention
         """
         _ensure_llm_imports()
-        
+
         self.device = device
         self.model_path = model_path
         self.adapter_path = adapter_path
-        
+
         # 加载模型和分词器
         self._load_model(use_flash_attention)
-        
+
         # 加载提示词配置
         self.evaluation_prompt = DEFAULT_EVALUATION_PROMPT
         if prompt_config_path and Path(prompt_config_path).exists():
@@ -153,17 +158,17 @@ class LLMLayoutEvaluator:
                 config = yaml.safe_load(f)
                 if 'llm_evaluation_prompt' in config:
                     self.evaluation_prompt = config['llm_evaluation_prompt']
-    
+
     def _load_model(self, use_flash_attention: bool):
         """加载模型"""
-        print(f"正在加载评估模型: {self.model_path}")
-        
+        logger.info("正在加载评估模型: %s", self.model_path)
+
         # 加载分词器
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,
             trust_remote_code=True
         )
-        
+
         # 加载模型
         if use_flash_attention:
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -180,18 +185,18 @@ class LLMLayoutEvaluator:
                 device_map="auto",
                 trust_remote_code=True
             )
-        
+
         # 加载LoRA适配器（如果提供）
         if self.adapter_path:
-            print(f"加载LoRA适配器: {self.adapter_path}")
+            logger.info("加载LoRA适配器: %s", self.adapter_path)
             self.model = PeftModel.from_pretrained(
                 self.model,
                 self.adapter_path
             )
-        
+
         self.model.eval()
-        print("评估模型加载完成")
-    
+        logger.info("评估模型加载完成")
+
     def _build_prompt(
         self,
         generated_layout: Dict[str, List[int]],
@@ -201,45 +206,36 @@ class LLMLayoutEvaluator:
         # 分离边界信息
         boundary_info = {}
         existing_elements = {}
-        
+
         for name, params in existing_layout.items():
             if name == "边界":
                 boundary_info[name] = params
             else:
                 existing_elements[name] = params
-        
+
         # 格式化提示词
         prompt = self.evaluation_prompt.format(
-            boundary_info=json.dumps(boundary_info, ensure_ascii=False, indent=2),
-            generated_layout=json.dumps(generated_layout, ensure_ascii=False, indent=2),
-            existing_elements=json.dumps(existing_elements, ensure_ascii=False, indent=2)
+            boundary_info=json.dumps(
+                boundary_info, ensure_ascii=False, indent=2),
+            generated_layout=json.dumps(
+                generated_layout, ensure_ascii=False, indent=2),
+            existing_elements=json.dumps(
+                existing_elements, ensure_ascii=False, indent=2)
         )
-        
+
         return prompt
-    
+
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """解析LLM响应"""
-        try:
-            # 尝试提取JSON部分
-            json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                # 尝试直接解析
-                json_str = response.strip()
-                # 移除可能的markdown标记
-                if json_str.startswith('```'):
-                    json_str = json_str.split('```')[1]
-                    if json_str.startswith('json'):
-                        json_str = json_str[4:]
-            
-            result = json.loads(json_str)
-            return result
-        except json.JSONDecodeError as e:
-            print(f"JSON解析失败: {e}")
-            print(f"原始响应: {response[:500]}")
-            return None
-    
+        json_str = extract_json_from_text(response)
+        if json_str:
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                logger.warning("JSON解析失败: %s | 原始响应前500字: %s",
+                               e, response[:500])
+        return None
+
     def evaluate(
         self,
         generated_layout: Dict[str, List[int]],
@@ -249,35 +245,35 @@ class LLMLayoutEvaluator:
     ) -> LLMEvaluationResult:
         """
         使用LLM评估布局
-        
+
         Args:
             generated_layout: 生成的房间布局
             existing_layout: 已有的布局（包括边界、采光面等）
             max_new_tokens: 最大生成token数
             temperature: 采样温度（较低以获得更稳定的结果）
-            
+
         Returns:
             LLMEvaluationResult: 评估结果
         """
         # 构建提示词
         prompt = self._build_prompt(generated_layout, existing_layout)
-        
+
         # 构建消息
         messages = [
             {"role": "system", "content": "你是一位专业的建筑设计师，擅长评估户型布局的合理性。请严格按照要求的JSON格式输出。"},
             {"role": "user", "content": prompt}
         ]
-        
+
         # 应用聊天模板
         text = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True
         )
-        
+
         # 编码输入
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        
+
         # 生成响应
         with torch.no_grad():
             outputs = self.model.generate(
@@ -288,16 +284,16 @@ class LLMLayoutEvaluator:
                 top_p=0.9,
                 pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
             )
-        
+
         # 解码响应
         response = self.tokenizer.decode(
             outputs[0][inputs['input_ids'].shape[1]:],
             skip_special_tokens=True
         )
-        
+
         # 解析响应
         parsed = self._parse_response(response)
-        
+
         if parsed:
             # 提取评分
             scores = parsed.get('scores', {})
@@ -308,9 +304,10 @@ class LLMLayoutEvaluator:
                 "功能分区": scores.get("功能分区", 5),
                 "尺寸规范": scores.get("尺寸规范", 5)
             }
-            
-            total_score = parsed.get('total_score', sum(dimension_scores.values()) / len(dimension_scores))
-            
+
+            total_score = parsed.get('total_score', sum(
+                dimension_scores.values()) / len(dimension_scores))
+
             return LLMEvaluationResult(
                 total_score=total_score,
                 dimension_scores=dimension_scores,
@@ -337,7 +334,7 @@ class LLMLayoutEvaluator:
                 raw_response=response,
                 confidence=0.0
             )
-    
+
     def batch_evaluate(
         self,
         layouts: List[Tuple[Dict[str, List[int]], Dict[str, List[int]]]],
@@ -345,11 +342,11 @@ class LLMLayoutEvaluator:
     ) -> List[LLMEvaluationResult]:
         """
         批量评估多个布局
-        
+
         Args:
             layouts: 布局列表，每个元素为 (generated_layout, existing_layout)
             **kwargs: 传递给evaluate的参数
-            
+
         Returns:
             评估结果列表
         """
@@ -362,7 +359,7 @@ class LLMLayoutEvaluator:
 
 class HybridLayoutEvaluator:
     """混合评估器：结合规则评估和LLM评估"""
-    
+
     def __init__(
         self,
         rule_evaluator,  # LayoutEvaluator实例
@@ -371,7 +368,7 @@ class HybridLayoutEvaluator:
     ):
         """
         初始化混合评估器
-        
+
         Args:
             rule_evaluator: 规则评估器
             llm_evaluator: LLM评估器（可选）
@@ -381,7 +378,7 @@ class HybridLayoutEvaluator:
         self.llm_evaluator = llm_evaluator
         self.llm_weight = llm_weight if llm_evaluator else 0.0
         self.rule_weight = 1.0 - self.llm_weight
-    
+
     def evaluate(
         self,
         generated_layout: Dict[str, List[int]],
@@ -389,13 +386,14 @@ class HybridLayoutEvaluator:
     ) -> Dict[str, Any]:
         """
         综合评估布局
-        
+
         Returns:
             包含规则评估和LLM评估结果的字典
         """
         # 规则评估
-        rule_result = self.rule_evaluator.evaluate(generated_layout, existing_layout)
-        
+        rule_result = self.rule_evaluator.evaluate(
+            generated_layout, existing_layout)
+
         result = {
             "rule_evaluation": {
                 "total_score": rule_result.total_score,
@@ -410,12 +408,13 @@ class HybridLayoutEvaluator:
             "combined_suggestions": rule_result.suggestions.copy(),
             "is_valid": rule_result.is_valid
         }
-        
+
         # LLM评估（如果可用）
         if self.llm_evaluator:
             try:
-                llm_result = self.llm_evaluator.evaluate(generated_layout, existing_layout)
-                
+                llm_result = self.llm_evaluator.evaluate(
+                    generated_layout, existing_layout)
+
                 result["llm_evaluation"] = {
                     "total_score": llm_result.total_score,
                     "dimension_scores": llm_result.dimension_scores,
@@ -424,46 +423,46 @@ class HybridLayoutEvaluator:
                     "is_valid": llm_result.is_valid,
                     "confidence": llm_result.confidence
                 }
-                
+
                 # 计算综合得分（LLM是10分制，规则是100分制）
                 llm_score_100 = llm_result.total_score * 10
                 result["combined_score"] = (
                     self.rule_weight * rule_result.total_score +
                     self.llm_weight * llm_score_100
                 )
-                
+
                 # 合并问题和建议（去重）
                 for issue in llm_result.issues:
                     if issue not in result["combined_issues"]:
                         result["combined_issues"].append(issue)
-                
+
                 for suggestion in llm_result.suggestions:
                     if suggestion not in result["combined_suggestions"]:
                         result["combined_suggestions"].append(suggestion)
-                
+
                 # 综合有效性判断
                 result["is_valid"] = rule_result.is_valid and llm_result.is_valid
-                
+
             except Exception as e:
-                print(f"LLM评估失败: {e}")
+                logger.warning("LLM评估失败: %s", e)
                 result["llm_evaluation"] = {"error": str(e)}
-        
+
         return result
 
 
 def create_llm_evaluator(
     model_path: str,
-    adapter_path: str = None,
+    adapter_path: Optional[str] = None,
     device: str = "cuda"
 ) -> LLMLayoutEvaluator:
     """
     创建LLM评估器的便捷函数
-    
+
     Args:
         model_path: 基座模型路径
         adapter_path: LoRA适配器路径
         device: 运行设备
-        
+
     Returns:
         LLMLayoutEvaluator实例
     """
@@ -476,28 +475,28 @@ def create_llm_evaluator(
 
 def create_hybrid_evaluator(
     rule_evaluator,
-    model_path: str = None,
-    adapter_path: str = None,
+    model_path: Optional[str] = None,
+    adapter_path: Optional[str] = None,
     llm_weight: float = 0.4,
     device: str = "cuda"
 ) -> HybridLayoutEvaluator:
     """
     创建混合评估器的便捷函数
-    
+
     Args:
         rule_evaluator: 规则评估器
         model_path: LLM模型路径（如果为None则只用规则评估）
         adapter_path: LoRA适配器路径
         llm_weight: LLM评估权重
         device: 运行设备
-        
+
     Returns:
         HybridLayoutEvaluator实例
     """
     llm_evaluator = None
     if model_path:
         llm_evaluator = create_llm_evaluator(model_path, adapter_path, device)
-    
+
     return HybridLayoutEvaluator(
         rule_evaluator=rule_evaluator,
         llm_evaluator=llm_evaluator,
@@ -523,29 +522,29 @@ QWEN14B_DEFAULT_CONFIG = {
 
 
 def create_qwen14b_evaluator(
-    base_model_path: str = None,
-    adapter_path: str = None,
+    base_model_path: Optional[str] = None,
+    adapter_path: Optional[str] = None,
     device: str = "cuda",
     use_flash_attention: bool = False
 ) -> LLMLayoutEvaluator:
     """
     创建使用微调后的 Qwen2.5-14B 作为评估器
-    
+
     这个模型是专门为户型评估任务微调的，比基座模型评估更准确。
-    
+
     Args:
         base_model_path: 基座模型路径，默认使用服务器路径
         adapter_path: LoRA适配器路径，默认使用服务器路径
         device: 运行设备
         use_flash_attention: 是否使用Flash Attention
-        
+
     Returns:
         LLMLayoutEvaluator实例
-        
+
     使用示例:
         # 方式1：使用默认路径（服务器）
         evaluator = create_qwen14b_evaluator()
-        
+
         # 方式2：指定自定义路径
         evaluator = create_qwen14b_evaluator(
             base_model_path="/path/to/Qwen2.5-14B-Instruct",
@@ -553,22 +552,21 @@ def create_qwen14b_evaluator(
         )
     """
     import platform
-    
+
     # 确定默认路径
     if base_model_path is None:
         base_model_path = QWEN14B_DEFAULT_CONFIG["linux"]["base_model"]
-    
+
     if adapter_path is None:
         # 根据操作系统选择默认适配器路径
         if platform.system() == "Windows":
             adapter_path = QWEN14B_DEFAULT_CONFIG["windows"]["adapter"]
         else:
             adapter_path = QWEN14B_DEFAULT_CONFIG["linux"]["adapter"]
-    
-    print(f"创建 Qwen14B 微调评估器:")
-    print(f"  基座模型: {base_model_path}")
-    print(f"  LoRA适配器: {adapter_path}")
-    
+
+    logger.info("创建 Qwen14B 微调评估器: 基座=%s, LoRA=%s",
+                base_model_path, adapter_path)
+
     return LLMLayoutEvaluator(
         model_path=base_model_path,
         adapter_path=adapter_path,
@@ -579,23 +577,23 @@ def create_qwen14b_evaluator(
 
 def create_qwen14b_hybrid_evaluator(
     rule_evaluator=None,
-    base_model_path: str = None,
-    adapter_path: str = None,
+    base_model_path: Optional[str] = None,
+    adapter_path: Optional[str] = None,
     llm_weight: float = 0.4,
     device: str = "cuda"
 ) -> HybridLayoutEvaluator:
     """
     创建使用 Qwen14B 微调模型的混合评估器
-    
+
     结合规则评估（60%）和 LLM 评估（40%）
-    
+
     Args:
         rule_evaluator: 规则评估器，如果为None则自动创建
         base_model_path: 基座模型路径
         adapter_path: LoRA适配器路径
         llm_weight: LLM评估权重
         device: 运行设备
-        
+
     Returns:
         HybridLayoutEvaluator实例
     """
@@ -603,14 +601,14 @@ def create_qwen14b_hybrid_evaluator(
     if rule_evaluator is None:
         from .evaluator import LayoutEvaluator
         rule_evaluator = LayoutEvaluator()
-    
+
     # 创建 Qwen14B LLM 评估器
     llm_evaluator = create_qwen14b_evaluator(
         base_model_path=base_model_path,
         adapter_path=adapter_path,
         device=device
     )
-    
+
     return HybridLayoutEvaluator(
         rule_evaluator=rule_evaluator,
         llm_evaluator=llm_evaluator,

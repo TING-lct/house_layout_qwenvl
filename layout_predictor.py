@@ -3,21 +3,26 @@
 复用现有的predictor.py代码结构，集成优化功能
 """
 
+from core.generator import LayoutResult, GenerationConfig
+from core.evaluator import EvaluationResult
+from core import LayoutEvaluator, LayoutRuleEngine, ValidationResult
+from core.common import extract_json_from_text, clean_json_str, parse_layout_json
 import json
-import yaml
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import sys
 import logging
 from pathlib import Path
 
+try:
+    import yaml  # type: ignore[import-not-found]
+except ImportError:
+    yaml = None
+
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
 
 # 导入评估和规则模块（不需要GPU）
-from core import LayoutEvaluator, LayoutRuleEngine, ValidationResult
-from core.evaluator import EvaluationResult
-from core.generator import LayoutResult, GenerationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -72,19 +77,19 @@ class LayoutPredictor:
     户型布局预测器
     复用predictor.py的代码结构，集成评估和优化功能
     """
-    
+
     def __init__(
         self,
         base_model_path: str = "models/Qwen2.5-VL-7B-Instruct",
         lora_adapter_path: str = "lora_model",
         device: str = "cuda",
         use_flash_attention: bool = False,
-        rules_config_path: str = None,
-        prompts_config_path: str = None
+        rules_config_path: Optional[str] = None,
+        prompts_config_path: Optional[str] = None
     ):
         """
         初始化预测器
-        
+
         Args:
             base_model_path: 基础模型路径
             lora_adapter_path: LoRA适配器路径
@@ -97,26 +102,26 @@ class LayoutPredictor:
         self.base_model_path = base_model_path
         self.lora_adapter_path = lora_adapter_path
         self.use_flash_attention = use_flash_attention
-        
+
         # 模型和处理器（延迟加载）
-        self.model = None
-        self.processor = None
-        
+        self.model: Any = None
+        self.processor: Any = None
+
         # 加载配置文件
         self._project_root = Path(__file__).parent
         self.prompts_config = self._load_prompts_config(prompts_config_path)
-        
+
         # 评估器和规则引擎（使用配置文件）
         rules_path = self._resolve_config_path(
             rules_config_path, "config/rules.yaml"
         )
         self.evaluator = LayoutEvaluator(rules_path)
         self.rule_engine = LayoutRuleEngine(rules_path)
-        
+
         # 是否已加载模型
         self._model_loaded = False
-    
-    def _resolve_config_path(self, explicit_path: str, default_relative: str) -> Optional[str]:
+
+    def _resolve_config_path(self, explicit_path: Optional[str], default_relative: str) -> Optional[str]:
         """解析配置文件路径"""
         if explicit_path and Path(explicit_path).exists():
             return explicit_path
@@ -124,20 +129,20 @@ class LayoutPredictor:
         if default_path.exists():
             return str(default_path)
         return None
-    
-    def _load_prompts_config(self, config_path: str = None) -> Dict:
+
+    def _load_prompts_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         """加载提示词配置"""
         path = self._resolve_config_path(config_path, "config/prompts.yaml")
-        if path:
+        if path and yaml is not None:
             try:
                 with open(path, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f)
+                    config = yaml.safe_load(f)  # type: ignore[union-attr]
                 logger.info(f"已加载提示词配置: {path}")
                 return config
             except Exception as e:
                 logger.warning(f"加载提示词配置失败: {e}")
         return self._default_prompts_config()
-    
+
     @staticmethod
     def _default_prompts_config() -> Dict:
         """默认提示词配置"""
@@ -158,30 +163,31 @@ class LayoutPredictor:
                 "请输出修正后的完整布局参数。"
             )
         }
-    
+
     def load_model(self):
         """加载模型（复用predictor.py的代码）"""
         if self._model_loaded:
             return
-        
-        import torch
+
+        import torch  # type: ignore[import-not-found]
+        # type: ignore[import-not-found]
         from transformers import AutoProcessor
-        from peft import PeftModel
+        from peft import PeftModel  # type: ignore[import-not-found]
 
         model_cls, model_cls_name, use_trust_remote_code = _resolve_qwen_vl_model_class()
         logger.info(f"使用模型类: {model_cls_name}")
-        
-        print(f"正在加载基础模型: {self.base_model_path}")
+
+        logger.info("正在加载基础模型: %s", self.base_model_path)
 
         model_source = self.base_model_path
 
-        load_kwargs = {
+        load_kwargs: Dict[str, Any] = {
             "device_map": "auto",
         }
         if use_trust_remote_code:
             # 兼容旧版 transformers，通过 auto class + remote code 加载
             load_kwargs["trust_remote_code"] = True
-        
+
         def _load_from(source: str):
             if self.use_flash_attention:
                 return model_cls.from_pretrained(
@@ -219,9 +225,10 @@ class LayoutPredictor:
                 ) from e
         except Exception as e:
             if _is_unknown_qwen25_arch_error(e):
-                import transformers
+                import transformers  # type: ignore[import-not-found]
 
-                current_version = getattr(transformers, "__version__", "unknown")
+                current_version = getattr(
+                    transformers, "__version__", "unknown")
                 raise RuntimeError(
                     "当前 transformers 版本不支持 Qwen2.5-VL（缺少 qwen2_5_vl 架构）。\n"
                     f"当前版本: {current_version}\n"
@@ -231,10 +238,10 @@ class LayoutPredictor:
                     "  pip install -U qwen-vl-utils"
                 ) from e
             raise
-        
+
         # 加载LoRA适配器
         if self.lora_adapter_path:
-            print(f"正在加载LoRA适配器: {self.lora_adapter_path}")
+            logger.info("正在加载LoRA适配器: %s", self.lora_adapter_path)
             try:
                 import warnings
                 with warnings.catch_warnings():
@@ -244,7 +251,8 @@ class LayoutPredictor:
                         message=".*missing adapter keys.*",
                         category=UserWarning,
                     )
-                    self.model = PeftModel.from_pretrained(self.model, self.lora_adapter_path)
+                    self.model = PeftModel.from_pretrained(
+                        self.model, self.lora_adapter_path)
                 self.model = self.model.half()
             except ValueError as e:
                 # LoRA 与基座模型不匹配时，跳过适配器
@@ -253,7 +261,7 @@ class LayoutPredictor:
                     "原因: %s",
                     e,
                 )
-        
+
         # 加载处理器
         # 若发生了本地->远端回退，处理器也使用同一来源
         self.base_model_path = model_source
@@ -261,10 +269,10 @@ class LayoutPredictor:
             model_source,
             use_fast=True
         )
-        
+
         self._model_loaded = True
-        print("模型加载完成")
-    
+        logger.info("模型加载完成")
+
     def generate_raw(
         self,
         image_path: str,
@@ -277,7 +285,7 @@ class LayoutPredictor:
     ) -> str:
         """
         原始生成（复用gen.ipynb的推理代码）
-        
+
         Args:
             image_path: 图片路径
             query: 查询文本
@@ -285,15 +293,15 @@ class LayoutPredictor:
             temperature: 温度参数
             top_p: top-p采样参数
             do_sample: 是否采样
-            
+
         Returns:
             生成的文本
         """
         # 确保模型已加载
         self.load_model()
-        
-        from qwen_vl_utils import process_vision_info
-        
+
+        from qwen_vl_utils import process_vision_info  # type: ignore
+
         # 构建消息
         messages = [
             {
@@ -304,7 +312,7 @@ class LayoutPredictor:
                 ],
             }
         ]
-        
+
         # 准备输入
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -318,9 +326,9 @@ class LayoutPredictor:
             return_tensors="pt",
         )
         inputs = inputs.to(self.device)
-        
+
         # 生成
-        import torch
+        import torch  # type: ignore[import-not-found]
         with torch.no_grad():
             generated_ids = self.model.generate(
                 **inputs,
@@ -330,106 +338,33 @@ class LayoutPredictor:
                 do_sample=do_sample,
                 repetition_penalty=repetition_penalty
             )
-        
+
         # 解码
         generated_ids_trimmed = [
-            out_ids[len(in_ids):] 
+            out_ids[len(in_ids):]
             for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
         output_text = self.processor.batch_decode(
-            generated_ids_trimmed, 
-            skip_special_tokens=True, 
+            generated_ids_trimmed,
+            skip_special_tokens=True,
             clean_up_tokenization_spaces=False
         )
-        
+
         return output_text[0] if output_text else ""
-    
+
     def parse_output(self, output_text: str) -> Dict[str, List[int]]:
-        """解析模型输出为布局字典（增强容错）"""
-        import re
-
-        # 第1步：提取 JSON 片段
-        json_str = self._extract_json_str(output_text)
-        if not json_str:
-            print(f"解析输出失败: 未找到JSON内容")
-            return {}
-
-        # 第2步：尝试直接解析
-        try:
-            return self._validate_layout(json.loads(json_str))
-        except json.JSONDecodeError:
-            pass
-
-        # 第3步：清理常见 LLM 格式错误后重试
-        cleaned = self._clean_json_str(json_str)
-        try:
-            return self._validate_layout(json.loads(cleaned))
-        except json.JSONDecodeError:
-            pass
-
-        # 第4步：正则兜底提取 "房间名": [x, y, w, h]
-        try:
-            layout = {}
-            pattern = r'"([^"]+)"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]'
-            for m in re.finditer(pattern, output_text):
-                name = m.group(1)
-                vals = [int(m.group(i)) for i in range(2, 6)]
-                layout[name] = vals
-            if layout:
-                return layout
-        except Exception:
-            pass
-
-        print(f"解析输出失败: 所有方法均失败")
-        return {}
+        """解析模型输出为布局字典（委托给 common.parse_layout_json）"""
+        return parse_layout_json(output_text)
 
     @staticmethod
     def _extract_json_str(text: str) -> str:
-        """从模型输出中提取 JSON 字符串"""
-        # 优先提取 ```json ... ``` 块
-        if "```json" in text:
-            parts = text.split("```json", 1)
-            if len(parts) > 1:
-                end = parts[1].find("```")
-                return parts[1][:end].strip() if end != -1 else parts[1].strip()
-        if "```" in text:
-            parts = text.split("```")
-            if len(parts) >= 2:
-                return parts[1].strip()
-        # 提取第一个 { ... } 块
-        start = text.find("{")
-        if start != -1:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == "{":
-                    depth += 1
-                elif text[i] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i + 1]
-            # 未闭合，尝试补 }
-            return text[start:] + "}"
-        return text.strip()
+        """从模型输出中提取 JSON 字符串（委托给 common.extract_json_from_text）"""
+        return extract_json_from_text(text) or text.strip()
 
     @staticmethod
     def _clean_json_str(s: str) -> str:
-        """清理 LLM 常见的 JSON 格式错误"""
-        import re
-        # 移除行注释
-        s = re.sub(r'//[^\n]*', '', s)
-        # 移除末尾多余逗号（对象/数组最后一个元素后面）
-        s = re.sub(r',\s*([}\]])', r'\1', s)
-        # 修复单引号 -> 双引号
-        # 仅在键名位置替换
-        s = re.sub(r"(?<=\{|,)\s*'([^']+)'\s*:", r' "\1":', s)
-        # 移除可能的省略号
-        s = re.sub(r'\.{3,}', '', s)
-        # 确保闭合
-        open_braces = s.count('{') - s.count('}')
-        s += '}' * max(0, open_braces)
-        open_brackets = s.count('[') - s.count(']')
-        s += ']' * max(0, open_brackets)
-        return s
+        """清理 LLM 常见的 JSON 格式错误（委托给 common.clean_json_str）"""
+        return clean_json_str(s)
 
     @staticmethod
     def _validate_layout(data) -> Dict[str, List[int]]:
@@ -444,29 +379,29 @@ class LayoutPredictor:
                 except (ValueError, TypeError):
                     continue
         return layout
-    
+
     def generate(
         self,
         image_path: str,
         query: str,
-        existing_layout: Dict[str, List[int]] = None,
-        config: GenerationConfig = None
+        existing_layout: Optional[Dict[str, List[int]]] = None,
+        config: Optional[GenerationConfig] = None
     ) -> LayoutResult:
         """
         生成布局并解析
-        
+
         Args:
             image_path: 图片路径
             query: 查询文本
             existing_layout: 已有布局（用于评估）
             config: 生成配置
-            
+
         Returns:
             LayoutResult: 生成结果
         """
         if config is None:
             config = GenerationConfig()
-        
+
         # 生成原始输出
         raw_output = self.generate_raw(
             image_path=image_path,
@@ -477,21 +412,21 @@ class LayoutPredictor:
             do_sample=config.do_sample,
             repetition_penalty=config.repetition_penalty
         )
-        
+
         # 解析输出
         layout = self.parse_output(raw_output)
-        
+
         # 评估（如果提供了已有布局）
         score = 0.0
         issues = []
         is_valid = bool(layout)
-        
+
         if layout and existing_layout:
             eval_result = self.evaluator.evaluate(layout, existing_layout)
             score = eval_result.total_score
             issues = eval_result.issues
             is_valid = eval_result.is_valid
-        
+
         return LayoutResult(
             layout=layout,
             raw_output=raw_output,
@@ -499,31 +434,31 @@ class LayoutPredictor:
             is_valid=is_valid,
             issues=issues
         )
-    
+
     def generate_candidates(
         self,
         image_path: str,
         query: str,
-        existing_layout: Dict[str, List[int]] = None,
+        existing_layout: Optional[Dict[str, List[int]]] = None,
         num_candidates: int = 3,
-        temperatures: List[float] = None
+        temperatures: Optional[List[float]] = None
     ) -> List[LayoutResult]:
         """
         生成多个候选布局
-        
+
         Args:
             image_path: 图片路径
             query: 查询文本
             existing_layout: 已有布局
             num_candidates: 候选数量
             temperatures: 温度列表
-            
+
         Returns:
             List[LayoutResult]: 候选结果列表
         """
         if temperatures is None:
             temperatures = [0.3, 0.5, 0.7, 0.85, 0.95][:num_candidates]
-        
+
         candidates = []
         for temp in temperatures:
             config = GenerationConfig(temperature=temp)
@@ -534,41 +469,42 @@ class LayoutPredictor:
                 config=config
             )
             candidates.append(result)
-        
+
         return candidates
-    
+
     def select_best(
         self,
         candidates: List[LayoutResult],
         existing_layout: Dict[str, List[int]]
-    ) -> Tuple[LayoutResult, EvaluationResult]:
+    ) -> Tuple[Optional[LayoutResult], Optional[EvaluationResult]]:
         """
         从候选中选择最优结果
-        
+
         Args:
             candidates: 候选列表
             existing_layout: 已有布局
-            
+
         Returns:
             Tuple[最优结果, 评估结果]
         """
         best_result = None
         best_eval = None
         best_score = -1
-        
+
         for candidate in candidates:
             if not candidate.layout:
                 continue
-            
-            eval_result = self.evaluator.evaluate(candidate.layout, existing_layout)
-            
+
+            eval_result = self.evaluator.evaluate(
+                candidate.layout, existing_layout)
+
             if eval_result.total_score > best_score:
                 best_score = eval_result.total_score
                 best_result = candidate
                 best_eval = eval_result
-        
+
         return best_result, best_eval
-    
+
     def generate_optimized(
         self,
         image_path: str,
@@ -584,13 +520,13 @@ class LayoutPredictor:
         完整优化生成流程：
         多候选生成 → 评估打分 → 选择最优 → 规则修复 → 识别问题 → 
         注入问题到Prompt → 重新生成 → 循环直到满意
-        
+
         实现优化技术方案中的迭代优化策略：
         1. 多样性生成：通过不同温度采样产生多个候选
         2. 评分选择：对候选进行五维度评估，选择最优
         3. 规则修复：对最优候选进行硬性规则修复
         4. 迭代修正：将本轮问题注入Prompt，引导模型在下一轮避免
-        
+
         Args:
             image_path: 图片路径
             query: 原始查询文本
@@ -600,31 +536,31 @@ class LayoutPredictor:
             max_iterations: 最大迭代轮数
             auto_fix: 是否使用规则引擎自动修复
             improvement_threshold: 最小改进阈值（低于此值视为收敛）
-            
+
         Returns:
             OptimizedResult: 包含完整优化历史的结果
         """
-        best_layout = None
+        best_layout: Optional[Dict[str, List[int]]] = None
         best_raw_output = ""
         best_score = 0.0
-        best_eval = None
+        best_eval: Optional[EvaluationResult] = None
         total_candidates = 0
-        history = []
-        
+        history: List[Dict[str, Any]] = []
+
         current_query = query  # 初始查询
-        
+
         for iteration in range(max_iterations):
             iter_info = {
                 'iteration': iteration + 1,
                 'query_type': '初始查询' if iteration == 0 else '修正查询',
             }
-            
-            print(f"\n{'='*50}")
-            print(f"🔄 第 {iteration + 1}/{max_iterations} 轮优化")
-            print(f"{'='*50}")
-            
+
+            logger.info("\n" + "=" * 50)
+            logger.info("🔄 第 %d/%d 轮优化", iteration + 1, max_iterations)
+            logger.info("=" * 50)
+
             # ========== 第1步：多候选生成 ==========
-            print(f"  📝 生成 {num_candidates} 个候选...")
+            logger.info("  📝 生成 %d 个候选...", num_candidates)
             candidates = self.generate_candidates(
                 image_path=image_path,
                 query=current_query,
@@ -633,18 +569,20 @@ class LayoutPredictor:
             )
             total_candidates += len(candidates)
             iter_info['num_candidates'] = len(candidates)
-            
+
             # ========== 第2步：评估打分 + 验证 ==========
-            print(f"  🔍 评估候选结果...")
+            logger.info("  🔍 评估候选结果...")
             candidate_details = []
             for i, cand in enumerate(candidates):
                 if not cand.layout:
-                    print(f"    候选{i+1}: ❌ 解析失败")
+                    logger.warning("    候选%d: ❌ 解析失败", i + 1)
                     continue
-                
-                eval_result = self.evaluator.evaluate(cand.layout, existing_layout)
-                validation = self.rule_engine.validate(cand.layout, existing_layout)
-                
+
+                eval_result = self.evaluator.evaluate(
+                    cand.layout, existing_layout)
+                validation = self.rule_engine.validate(
+                    cand.layout, existing_layout)
+
                 candidate_details.append({
                     'index': i,
                     'layout': cand.layout,
@@ -654,25 +592,25 @@ class LayoutPredictor:
                     'validation': validation,
                     'is_rule_valid': validation.valid
                 })
-                
+
                 status = "✅" if validation.valid else "⚠️"
-                print(f"    候选{i+1}: {status} 得分={eval_result.total_score:.1f}, "
-                      f"规则通过={validation.valid}")
-            
+                logger.info("    候选%d: %s 得分=%.1f, 规则通过=%s",
+                            i + 1, status, eval_result.total_score, validation.valid)
+
             iter_info['num_valid'] = sum(
                 1 for c in candidate_details if c['is_rule_valid']
             )
-            
+
             if not candidate_details:
-                print(f"  ⚠️ 本轮无有效候选")
+                logger.warning("  ⚠️ 本轮无有效候选")
                 iter_info['best_score'] = 0
                 iter_info['issues'] = ['所有候选均解析失败']
                 history.append(iter_info)
                 continue
-            
+
             # ========== 第3步：修复所有候选 + 尺寸优化 + 选最优 ==========
             if auto_fix:
-                print(f"  🔧 修复并优化所有候选...")
+                logger.info("  🔧 修复并优化所有候选...")
                 for c in candidate_details:
                     try:
                         cur = c['layout']
@@ -703,20 +641,20 @@ class LayoutPredictor:
                             c['evaluation'] = new_eval
                             c['is_rule_valid'] = new_validation.valid
                     except Exception as e:
-                        print(f"    候选{c['index']+1} 修复异常: {e}")
-            
+                        logger.warning("    候选%d 修复异常: %s", c['index'] + 1, e)
+
             round_best = max(candidate_details, key=lambda x: x['score'])
-            
-            print(f"  🏆 本轮最优: 候选{round_best['index']+1}, "
-                  f"得分={round_best['score']:.1f}")
-            
+
+            logger.info("  🏆 本轮最优: 候选%d, 得分=%.1f",
+                        round_best['index'] + 1, round_best['score'])
+
             iter_info['best_score'] = round_best['score']
             iter_info['issues'] = round_best['evaluation'].issues
-            
+
             round_layout = round_best['layout']
             round_raw = round_best['raw_output']
             round_eval = round_best['evaluation']
-            
+
             # ========== 第5步：更新全局最优 ==========
             if round_eval.total_score > best_score:
                 improvement = round_eval.total_score - best_score
@@ -724,29 +662,31 @@ class LayoutPredictor:
                 best_raw_output = round_raw
                 best_score = round_eval.total_score
                 best_eval = round_eval
-                print(f"  ⬆️ 全局最优更新: {best_score:.1f} (+{improvement:.1f})")
+                logger.info("  ⬆️ 全局最优更新: %.1f (+%.1f)",
+                            best_score, improvement)
                 iter_info['improvement'] = improvement
             else:
-                print(f"  ➡️ 全局最优未变: {best_score:.1f}")
+                logger.info("  ➡️ 全局最优未变: %.1f", best_score)
                 iter_info['improvement'] = 0
-            
+
             history.append(iter_info)
-            
+
             # ========== 第6步：检查终止条件 ==========
             if best_score >= score_threshold:
-                print(f"  ✅ 达到满意阈值 ({score_threshold}), 停止优化")
+                logger.info("  ✅ 达到满意阈值 (%.1f), 停止优化", score_threshold)
                 break
-            
+
             # 检查收敛（仅在无剩余问题时允许因改进不足停止）
             has_issues = bool(best_eval and best_eval.issues)
             if iteration > 0 and iter_info.get('improvement', 0) < improvement_threshold:
                 if not has_issues:
-                    print(f"  📉 改进幅度不足且无剩余问题, 停止优化")
+                    logger.info("  📉 改进幅度不足且无剩余问题, 停止优化")
                     break
                 else:
-                    print(f"  📉 改进幅度不足 ({iter_info.get('improvement', 0):.1f}), "
-                          f"但仍有 {len(best_eval.issues)} 个问题, 继续迭代")
-            
+                    num_issues = len(best_eval.issues) if best_eval else 0
+                    logger.info("  📉 改进幅度不足 (%.1f), 但仍有 %d 个问题, 继续迭代",
+                                iter_info.get('improvement', 0), num_issues)
+
             # ========== 第7步：构造修正Prompt ==========
             if iteration < max_iterations - 1 and round_eval.issues:
                 current_query = self._build_fix_query(
@@ -754,8 +694,8 @@ class LayoutPredictor:
                     current_layout=round_layout,
                     issues=round_eval.issues
                 )
-                print(f"  📋 已注入 {len(round_eval.issues)} 个问题到下一轮Prompt")
-        
+                logger.info("  📋 已注入 %d 个问题到下一轮Prompt", len(round_eval.issues))
+
         # ========== 最终结果 ==========
         if best_layout is None:
             return OptimizedResult(
@@ -769,10 +709,11 @@ class LayoutPredictor:
                 optimization_rounds=len(history),
                 iteration_history=history
             )
-        
+
         # 最终规则修复 + 尺寸优化 + 激进后处理
         if auto_fix:
-            final_fix = self.rule_engine.validate_and_fix(best_layout, existing_layout)
+            final_fix = self.rule_engine.validate_and_fix(
+                best_layout, existing_layout)
             if final_fix.fixed_layout:
                 best_layout = final_fix.fixed_layout
             best_layout = self.rule_engine.optimize_dimensions(
@@ -783,17 +724,21 @@ class LayoutPredictor:
                 best_layout, existing_layout, max_passes=5
             )
             best_eval = self.evaluator.evaluate(best_layout, existing_layout)
-        
-        print(f"\n{'='*50}")
-        print(f"🎯 优化完成!")
-        print(f"  最终得分: {best_eval.total_score:.1f}")
-        print(f"  总候选数: {total_candidates}")
-        print(f"  迭代轮数: {len(history)}")
-        print(f"  是否满意: {best_eval.total_score >= score_threshold}")
+
+        # 确保 best_eval 不为 None（逻辑上此处 best_layout 非 None 时 best_eval 也非 None）
+        if best_eval is None:
+            best_eval = self.evaluator.evaluate(best_layout, existing_layout)
+
+        logger.info("\n" + "=" * 50)
+        logger.info("🎯 优化完成!")
+        logger.info("  最终得分: %.1f", best_eval.total_score)
+        logger.info("  总候选数: %d", total_candidates)
+        logger.info("  迭代轮数: %d", len(history))
+        logger.info("  是否满意: %s", best_eval.total_score >= score_threshold)
         if best_eval.issues:
-            print(f"  剩余问题: {len(best_eval.issues)} 个")
-        print(f"{'='*50}")
-        
+            logger.info("  剩余问题: %d 个", len(best_eval.issues))
+        logger.info("=" * 50)
+
         return OptimizedResult(
             layout=best_layout,
             raw_output=best_raw_output,
@@ -805,7 +750,7 @@ class LayoutPredictor:
             optimization_rounds=len(history),
             iteration_history=history
         )
-    
+
     def _build_fix_query(
         self,
         original_query: str,
@@ -815,12 +760,12 @@ class LayoutPredictor:
         """
         构造迭代修正查询：将评估问题转化为具体可操作的数值修正指令，
         而不只是笼统地列出问题名。
-        
+
         例如 "宽度不足: 客厅 (最小3300mm)" → "客厅短边只有2100mm，需要≥3300mm"
         例如 "房间重叠: 卧室1 与 卧室2" → "卧室1和卧室2矩形区域重叠，请调整坐标使其不交叉"
         """
         import re
-        
+
         # 将问题转化为具体修正指令
         fix_instructions = []
         for issue in issues[:6]:  # 最多6条，避免过长
@@ -869,17 +814,17 @@ class LayoutPredictor:
                 fix_instructions.append(issue + "，请拉开它们的距离")
             else:
                 fix_instructions.append(issue)
-        
+
         issues_text = "；".join(fix_instructions)
         layout_json = json.dumps(current_layout, ensure_ascii=False)
-        
+
         return (
             f"{original_query}\n"
             f"上次生成的结果存在问题，请修正：{issues_text}。\n"
             f"上次结果：\n```json\n{layout_json}\n```\n"
             f"请输出修正后的完整JSON，格式为```json\n{{...}}\n```"
         )
-    
+
     def evaluate(
         self,
         layout: Dict[str, List[int]],
@@ -887,7 +832,7 @@ class LayoutPredictor:
     ) -> EvaluationResult:
         """评估布局"""
         return self.evaluator.evaluate(layout, existing_layout)
-    
+
     def validate(
         self,
         layout: Dict[str, List[int]],
@@ -910,6 +855,7 @@ _ROOM_SIZE_SPEC = {
     "主卫":   {"w": 1800, "l": 2400, "a": 4.32},
     "餐厅":   {"w": 1500, "l": 2000, "a": 3.0},
 }
+
 
 def _room_type(name: str) -> str:
     """房间名 → 类型（卧室1→卧室）"""
@@ -940,22 +886,22 @@ def build_query(
     floor_type: str,
     existing_params: Dict[str, List[int]],
     rooms_to_generate: List[str],
-    design_constraints: str = None,
-    prompts_config: Dict = None
+    design_constraints: Optional[str] = None,
+    prompts_config: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     构建查询文本（增强版，注入量化约束）
-    
+
     策略：保留与训练数据完全一致的主体格式（模型从这个模式中学会
     了 JSON 输出），在末尾追加简短的量化硬约束，用自然语言写，
     不破坏训练模式。
     """
     existing_json = json.dumps(existing_params, ensure_ascii=False)
     rooms_json = json.dumps(rooms_to_generate, ensure_ascii=False)
-    
+
     # 从 existing_params 解析边界范围
     boundary = existing_params.get("边界", None)
-    
+
     # ---- 主体：与训练数据格式完全一致 ----
     query = (
         f'请根据这张图片中已有的户型信息以及对应的参数，帮我生成其余房间的参数，'
@@ -967,7 +913,7 @@ def build_query(
         f'其余待生成的"{floor_type}"房间的名称为：\n'
         f'```json\n{rooms_json}```'
     )
-    
+
     # ---- 追加：简短量化约束（自然语言，不影响 JSON 输出格式） ----
     constraints = []
     if boundary and len(boundary) == 4:
@@ -977,21 +923,24 @@ def build_query(
             f"x+长度≤{bx+bw}，y+宽度≤{by+bh}"
         )
     constraints.append("任意两个房间的矩形区域不能重叠")
-    
+
     size_text = _build_size_constraints(rooms_to_generate)
     if size_text:
         constraints.append(f"最小尺寸要求：{size_text}")
-    
+
     constraints.append("厨房不宜与卫生间直接相邻")
     constraints.append("客厅、卧室应靠近采光面")
     constraints.append("客厅应靠近主入口")
     constraints.append("餐厅应与厨房相邻")
     constraints.append("房间应尽量填满边界空间，避免大面积空白")
     constraints.append("房间长宽比不宜超过4:1")
-    
+    constraints.append("房间不能与已有的采光区、黑体区、主入口区域重叠")
+    constraints.append("坐标和尺寸取300的整数倍（建筑模数对齐）")
+    constraints.append("只输出待生成房间的参数，不要包含已有房间")
+
     query += "\n注意：" + "；".join(constraints) + "。"
-    query += "\n请直接输出JSON，格式为```json\n{...}\n```"
-    
+    query += "\n请直接输出JSON，格式为```json\n{...}\n```，只包含待生成的房间。"
+
     return query
 
 
@@ -1011,30 +960,30 @@ def create_predictor(
 
 if __name__ == "__main__":
     # 测试（不加载模型，仅测试评估功能）
-    print("测试 LayoutPredictor（评估功能）...")
-    
+    logger.info("测试 LayoutPredictor（评估功能）...")
+
     predictor = LayoutPredictor()
-    
+
     # 测试评估
     existing = {
         "边界": [0, 0, 9600, 10500],
         "南采光": [0, -1200, 9600, 1200],
     }
-    
+
     generated = {
         "客厅": [0, 0, 4000, 4000],
         "卧室1": [0, 4500, 3300, 4000],
         "厨房": [4500, 0, 2400, 3000],
     }
-    
+
     result = predictor.evaluate(generated, existing)
-    print(f"评估得分: {result.total_score:.1f}")
-    print(f"问题: {result.issues}")
-    
+    logger.info("评估得分: %.1f", result.total_score)
+    logger.info("问题: %s", result.issues)
+
     # 测试验证
     val_result = predictor.validate(generated, existing)
-    print(f"验证通过: {val_result.valid}")
-    
+    logger.info("验证通过: %s", val_result.valid)
+
     # 测试查询构建
     query = build_query(
         house_type="城市",
@@ -1042,6 +991,6 @@ if __name__ == "__main__":
         existing_params=existing,
         rooms_to_generate=["客厅", "卧室1", "厨房"]
     )
-    print(f"\n构建的查询:\n{query[:200]}...")
-    
-    print("\n测试完成!")
+    logger.info("\n构建的查询:\n%s...", query[:200])
+
+    logger.info("\n测试完成!")

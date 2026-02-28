@@ -4,12 +4,19 @@
 """
 
 import json
+import logging
 import yaml
 from typing import Dict, List, Any, Tuple, Optional, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .evaluator import Room, LayoutEvaluator
+from .common import (
+    Room, get_room_type, is_normal_room, is_directional_lighting,
+    is_infrastructure, parse_layout as _parse_layout, ParsedLayout,
+    BOUNDARY_NAME, SKIP_ROOM_PREFIXES,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,11 +31,11 @@ class ValidationResult:
 
 class LayoutRuleEngine:
     """户型布局规则引擎"""
-    
-    def __init__(self, rules_config_path: str = None):
+
+    def __init__(self, rules_config_path: Optional[str] = None):
         """
         初始化规则引擎
-        
+
         Args:
             rules_config_path: 规则配置文件路径
         """
@@ -38,7 +45,7 @@ class LayoutRuleEngine:
                 self.rules_config = yaml.safe_load(f)
         else:
             self.rules_config = {}
-        
+
         # 空间约束
         self.space_constraints = self.rules_config.get('space_constraints', {
             "卧室": {"min_width": 2400, "min_length": 3000, "min_area": 7200000},
@@ -47,7 +54,7 @@ class LayoutRuleEngine:
             "卫生间": {"min_width": 1500, "min_length": 2100, "min_area": 3150000},
             "餐厅": {"min_width": 1500, "min_length": 2000, "min_area": 3000000},
         })
-        
+
         # 相邻规则
         self.adjacency_rules = self.rules_config.get('adjacency_rules', {
             'forbidden_pairs': [
@@ -59,7 +66,7 @@ class LayoutRuleEngine:
                 ["客厅", "餐厅"],
             ]
         })
-        
+
         # 注册硬性规则
         self.hard_rules: List[Callable] = [
             self.no_room_overlap,
@@ -67,60 +74,39 @@ class LayoutRuleEngine:
             self.minimum_dimensions,
             self.positive_dimensions,
         ]
-        
+
         # 注册软性规则
         self.soft_rules: List[Callable] = [
             self.kitchen_bathroom_separate,
             self.bedroom_near_lighting,
             self.reasonable_proportions,
         ]
-    
+
     def parse_layout(
-        self, 
+        self,
         layout_dict: Dict[str, List[int]]
     ) -> Tuple[List[Room], Optional[Room], Dict[str, Room]]:
-        """
-        解析布局字典
-        
-        Returns:
-            Tuple: (普通房间列表, 边界, 所有房间字典)
-        """
-        rooms = []
-        boundary = None
-        all_rooms = {}
-        
+        """解析布局字典（委托给 common.parse_layout，并兼容旧接口返回 all_rooms）"""
+        parsed = _parse_layout(layout_dict)
+        all_rooms: Dict[str, Room] = {}
         for name, params in layout_dict.items():
-            if len(params) != 4:
-                continue
-            
-            room = Room(
-                name=name,
-                x=params[0],
-                y=params[1],
-                width=params[2],
-                height=params[3]
-            )
-            all_rooms[name] = room
-            
-            if name == "边界":
-                boundary = room
-            elif not name.startswith(("采光", "南采光", "北采光", "东采光", "西采光", "黑体", "主入口")):
-                rooms.append(room)
-        
-        return rooms, boundary, all_rooms
-    
+            r = Room.from_params(name, params)
+            if r:
+                all_rooms[name] = r
+        return parsed.rooms, parsed.boundary, all_rooms
+
     def validate(
-        self, 
+        self,
         layout: Dict[str, List[int]],
-        full_layout: Dict[str, List[int]] = None
+        full_layout: Optional[Dict[str, List[int]]] = None
     ) -> ValidationResult:
         """
         验证布局是否符合规则
-        
+
         Args:
             layout: 生成的布局
             full_layout: 完整布局（包括已有房间和边界）
-            
+
         Returns:
             ValidationResult: 验证结果
         """
@@ -129,71 +115,71 @@ class LayoutRuleEngine:
             combined_layout = {**full_layout, **layout}
         else:
             combined_layout = layout
-        
+
         rooms, boundary, all_rooms = self.parse_layout(combined_layout)
-        
+
         hard_violations = []
         soft_violations = []
-        
+
         # 检查硬性规则
         for rule in self.hard_rules:
             result = rule(rooms, boundary, all_rooms)
             if not result['passed']:
                 hard_violations.extend(result['violations'])
-        
+
         # 检查软性规则
         for rule in self.soft_rules:
             result = rule(rooms, boundary, all_rooms)
             if not result['passed']:
                 soft_violations.extend(result['violations'])
-        
+
         return ValidationResult(
             valid=len(hard_violations) == 0,
             hard_violations=hard_violations,
             soft_violations=soft_violations
         )
-    
+
     def validate_and_fix(
         self,
         layout: Dict[str, List[int]],
-        full_layout: Dict[str, List[int]] = None,
+        full_layout: Optional[Dict[str, List[int]]] = None,
         max_attempts: int = 3
     ) -> ValidationResult:
         """
         验证并尝试修复布局
-        
+
         Args:
             layout: 生成的布局
             full_layout: 完整布局
             max_attempts: 最大修复尝试次数
-            
+
         Returns:
             ValidationResult: 验证结果（包含修复后的布局）
         """
         current_layout = layout.copy()
-        
+
         for attempt in range(max_attempts):
             result = self.validate(current_layout, full_layout)
-            
+
             if result.valid:
                 result.fixed_layout = current_layout
                 result.fix_applied = (attempt > 0)
                 return result
-            
+
             # 尝试修复
             current_layout = self.auto_fix(
-                current_layout, 
+                current_layout,
                 result.hard_violations,
                 full_layout
             )
-        
+
         # 最终验证
         final_result = self.validate(current_layout, full_layout)
         final_result.fixed_layout = current_layout
         final_result.fix_applied = True
-        
+
         return final_result
-    
+
     def auto_fix(
         self,
         layout: Dict[str, List[int]],
@@ -202,38 +188,40 @@ class LayoutRuleEngine:
     ) -> Dict[str, List[int]]:
         """
         自动修复违规项
-        
+
         Args:
             layout: 当前布局
             violations: 违规列表
             full_layout: 完整布局
-            
+
         Returns:
             Dict: 修复后的布局
         """
         fixed_layout = {k: v.copy() for k, v in layout.items()}
-        
+
         # 合并布局获取边界信息
         if full_layout:
             combined = {**full_layout, **layout}
         else:
             combined = layout
-        
+
         _, boundary, _ = self.parse_layout(combined)
-        
+
         for violation in violations:
             if "重叠" in violation:
-                fixed_layout = self._fix_overlap(fixed_layout, violation, boundary, full_layout)
+                fixed_layout = self._fix_overlap(
+                    fixed_layout, violation, boundary, full_layout)
             elif "超出边界" in violation:
-                fixed_layout = self._fix_boundary(fixed_layout, violation, boundary)
+                fixed_layout = self._fix_boundary(
+                    fixed_layout, violation, boundary)
             elif "尺寸" in violation:
                 fixed_layout = self._fix_dimensions(fixed_layout, violation)
-        
+
         return fixed_layout
-    
+
     def _fix_overlap(
-        self, 
-        layout: Dict[str, List[int]], 
+        self,
+        layout: Dict[str, List[int]],
         violation: str,
         boundary: Optional[Room] = None,
         full_layout: Dict[str, List[int]] = None
@@ -242,41 +230,42 @@ class LayoutRuleEngine:
         parts = violation.split(":")
         if len(parts) <= 1:
             return layout
-        
+
         room_info = parts[1].strip()
         if "与" not in room_info:
             return layout
-        
+
         room_names = room_info.split("与")
         if len(room_names) != 2:
             return layout
-        
+
         room1_name = room_names[0].strip()
         room2_name = room_names[1].strip()
-        
+
         # 决定移动哪个房间（优先移动在layout中的、面积较小的房间）
         if room2_name in layout and room1_name in layout:
             p1, p2 = layout[room1_name], layout[room2_name]
-            move_name = room2_name if p2[2] * p2[3] <= p1[2] * p1[3] else room1_name
+            move_name = room2_name if p2[2] * \
+                p2[3] <= p1[2] * p1[3] else room1_name
         elif room2_name in layout:
             move_name = room2_name
         elif room1_name in layout:
             move_name = room1_name
         else:
             return layout
-        
+
         params = layout[move_name]
         combined_base = dict(full_layout or {})
-        
+
         # 8方向搜索，步长递增，找最小位移解
         directions = [
             (1, 0), (-1, 0), (0, 1), (0, -1),
             (1, 1), (1, -1), (-1, 1), (-1, -1)
         ]
-        
+
         best_pos = None
         best_dist = float('inf')
-        
+
         for step in [300, 600, 900, 1200, 1800, 2400, 3600]:
             if best_pos is not None:
                 break  # 已找到最小位移解
@@ -298,12 +287,12 @@ class LayoutRuleEngine:
                     if dist < best_dist:
                         best_dist = dist
                         best_pos = test[:]
-        
+
         if best_pos:
             layout[move_name] = best_pos
-        
+
         return layout
-    
+
     def _fix_boundary(
         self,
         layout: Dict[str, List[int]],
@@ -313,14 +302,14 @@ class LayoutRuleEngine:
         """修复边界问题：先平移，再缩放"""
         if not boundary:
             return layout
-        
+
         # 提取房间名
         parts = violation.split(":")
         if len(parts) > 1:
             room_name = parts[1].strip()
             if room_name in layout:
                 params = layout[room_name]
-                
+
                 # 如果房间比边界大，先缩小到边界尺寸
                 max_w = boundary.width
                 max_h = boundary.height
@@ -328,7 +317,7 @@ class LayoutRuleEngine:
                     params[2] = max_w
                 if params[3] > max_h:
                     params[3] = max_h
-                
+
                 # 然后平移到边界内
                 if params[0] < boundary.x:
                     params[0] = boundary.x
@@ -338,9 +327,9 @@ class LayoutRuleEngine:
                     params[0] = boundary.x2 - params[2]
                 if params[1] + params[3] > boundary.y2:
                     params[1] = boundary.y2 - params[3]
-        
+
         return layout
-    
+
     def _fix_dimensions(
         self,
         layout: Dict[str, List[int]],
@@ -352,21 +341,21 @@ class LayoutRuleEngine:
         if len(parts) > 1:
             room_info = parts[1].strip()
             room_name = room_info.split("(")[0].strip()
-            
+
             if room_name in layout:
                 room_type = self._get_room_type(room_name)
                 if room_type in self.space_constraints:
                     constraints = self.space_constraints[room_type]
                     params = layout[room_name]
-                    
+
                     # 扩大尺寸
                     if params[2] < constraints.get('min_width', 0):
                         params[2] = constraints['min_width']
                     if params[3] < constraints.get('min_length', 0):
                         params[3] = constraints['min_length']
-        
+
         return layout
-    
+
     def optimize_dimensions(
         self,
         layout: Dict[str, List[int]],
@@ -380,17 +369,17 @@ class LayoutRuleEngine:
         fixed = {k: v.copy() for k, v in layout.items()}
         combined_base = dict(full_layout or {})
         _, boundary, _ = self.parse_layout({**combined_base, **layout})
-        
+
         for name in list(fixed.keys()):
             room_type = self._get_room_type(name)
             if room_type not in self.space_constraints:
                 continue
-            
+
             constraints = self.space_constraints[room_type]
             min_w = constraints.get('min_width', 0)
             min_l = constraints.get('min_length', 0)
             params = fixed[name]
-            
+
             # --- 短边修正 ---
             if min(params[2], params[3]) < min_w:
                 saved = params[:]
@@ -401,7 +390,7 @@ class LayoutRuleEngine:
                 self._clamp_boundary(params, boundary)
                 if self._would_overlap(name, params, fixed, combined_base):
                     params[:] = saved
-            
+
             # --- 长边修正 ---
             if max(params[2], params[3]) < min_l:
                 saved = params[:]
@@ -412,9 +401,9 @@ class LayoutRuleEngine:
                 self._clamp_boundary(params, boundary)
                 if self._would_overlap(name, params, fixed, combined_base):
                     params[:] = saved
-        
+
         return fixed
-    
+
     @staticmethod
     def _clamp_boundary(params: list, boundary):
         """将房间约束在边界内"""
@@ -426,18 +415,17 @@ class LayoutRuleEngine:
             params[0] = max(boundary.x, max_x - params[2])
         if params[1] + params[3] > max_y:
             params[1] = max(boundary.y, max_y - params[3])
-    
+
     @staticmethod
     def _would_overlap(name, params, layout, base_layout):
         """检查修改后的房间是否与其他房间或基础设施重叠"""
-        # 只跳过边界外的方向采光（它们在边界外不影响布局）
-        skip_prefixes = ('南采光', '北采光', '东采光', '西采光')
         test = Room(name=name, x=params[0], y=params[1],
                     width=params[2], height=params[3])
         for n, p in {**base_layout, **layout}.items():
-            if n == name or n == '边界' or len(p) != 4:
+            if n == name or n == BOUNDARY_NAME or len(p) != 4:
                 continue
-            if any(n.startswith(pre) for pre in skip_prefixes):
+            # 方向采光在边界外，不影响布局
+            if is_directional_lighting(n):
                 continue
             other = Room(name=n, x=p[0], y=p[1], width=p[2], height=p[3])
             if test.overlaps(other):
@@ -449,10 +437,10 @@ class LayoutRuleEngine:
     def expand_rooms_to_fill(
         self,
         layout: Dict[str, List[int]],
-        full_layout: Dict[str, List[int]] = None,
+        full_layout: Optional[Dict[str, List[int]]] = None,
         step: int = 300,
         max_rounds: int = 20,
-        max_area_ratios: Dict[str, float] = None
+        max_area_ratios: Optional[Dict[str, float]] = None
     ) -> Dict[str, List[int]]:
         """
         迭代地向四个方向扩大房间以填充边界内的空白区域。
@@ -481,7 +469,8 @@ class LayoutRuleEngine:
         # 读取各类型最大面积限制
         type_max_area = {}
         for room_type, constraints in self.space_constraints.items():
-            type_max_area[room_type] = constraints.get('max_area', float('inf'))
+            type_max_area[room_type] = constraints.get(
+                'max_area', float('inf'))
 
         # 确定扩张优先级：客厅 > 卧室 > 餐厅 > 其他
         priority_order = {"客厅": 0, "主卧": 1, "卧室": 2, "餐厅": 3,
@@ -492,8 +481,7 @@ class LayoutRuleEngine:
             return priority_order.get(rt, 10)
 
         room_names = sorted(
-            [n for n in fixed if not any(n.startswith(p) for p in
-                ('采光', '南采光', '北采光', '东采光', '西采光', '黑体', '主入口', '边界'))],
+            [n for n in fixed if is_normal_room(n)],
             key=_sort_key
         )
 
@@ -542,7 +530,8 @@ class LayoutRuleEngine:
                         continue
 
                     # 长宽比检查（不超过4:1）
-                    ratio = max(new_params[2], new_params[3]) / max(min(new_params[2], new_params[3]), 1)
+                    ratio = max(new_params[2], new_params[3]) / \
+                        max(min(new_params[2], new_params[3]), 1)
                     if ratio > 4.0:
                         continue
 
@@ -580,14 +569,13 @@ class LayoutRuleEngine:
         if not boundary:
             return fixed
 
-        skip_names = {'边界'}
-        skip_prefixes = ('采光', '南采光', '北采光', '东采光', '西采光', '黑体', '主入口')
+        skip_names = {BOUNDARY_NAME}
 
         bx1, by1 = boundary.x, boundary.y
         bx2, by2 = boundary.x2, boundary.y2
 
         for name in list(fixed.keys()):
-            if name in skip_names or any(name.startswith(p) for p in skip_prefixes):
+            if name in skip_names or not is_normal_room(name):
                 continue
             params = fixed[name]
             if len(params) != 4:
@@ -713,11 +701,11 @@ class LayoutRuleEngine:
                         continue
                     # 相邻检查
                     test_room = Room(name=move_name, x=test_params[0],
-                                    y=test_params[1], width=test_params[2],
-                                    height=test_params[3])
+                                     y=test_params[1], width=test_params[2],
+                                     height=test_params[3])
                     other_room = Room(name=other_name, x=other_p[0],
-                                     y=other_p[1], width=other_p[2],
-                                     height=other_p[3])
+                                      y=other_p[1], width=other_p[2],
+                                      height=other_p[3])
                     if not test_room.is_adjacent(other_room):
                         params[:] = test_params
                         moved = True
@@ -807,7 +795,8 @@ class LayoutRuleEngine:
                         if not self._would_overlap(name, test, fixed, combined_base):
                             cx = test[0] + tw // 2
                             cy = test[1] + th // 2
-                            dist = (cx - origin_cx) ** 2 + (cy - origin_cy) ** 2
+                            dist = (cx - origin_cx) ** 2 + \
+                                (cy - origin_cy) ** 2
                             if dist < best_dist:
                                 best_dist = dist
                                 best = test[:]
@@ -917,6 +906,57 @@ class LayoutRuleEngine:
     def _calc_dist(c1, c2):
         return ((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2) ** 0.5
 
+    def snap_to_grid(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None,
+        grid_size: int = 300
+    ) -> Dict[str, List[int]]:
+        """
+        将生成房间的坐标和尺寸对齐到建筑模数网格（默认300mm）。
+        对齐后检查重叠和超界，若有冲突则回退该房间的对齐操作。
+
+        Args:
+            layout: 生成的房间布局
+            full_layout: 完整布局（含边界等）
+            grid_size: 网格尺寸(mm)，默认300mm
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, _ = self.parse_layout({**combined_base, **fixed})
+
+        for name in list(fixed.keys()):
+            if not is_normal_room(name):
+                continue
+            params = fixed[name]
+            saved = params[:]
+
+            # 对齐坐标到最近的网格点
+            params[0] = round(params[0] / grid_size) * grid_size
+            params[1] = round(params[1] / grid_size) * grid_size
+            # 对齐尺寸（确保不小于一个网格单位）
+            params[2] = max(grid_size, round(
+                params[2] / grid_size) * grid_size)
+            params[3] = max(grid_size, round(
+                params[3] / grid_size) * grid_size)
+
+            # 边界约束
+            if boundary:
+                if params[0] < boundary.x:
+                    params[0] = boundary.x
+                if params[1] < boundary.y:
+                    params[1] = boundary.y
+                if params[0] + params[2] > boundary.x2:
+                    params[0] = boundary.x2 - params[2]
+                if params[1] + params[3] > boundary.y2:
+                    params[1] = boundary.y2 - params[3]
+
+            # 重叠检查：若对齐后产生新重叠则回退
+            if self._would_overlap(name, params, fixed, combined_base):
+                params[:] = saved
+
+        return fixed
+
     def aggressive_post_process(
         self,
         layout: Dict[str, List[int]],
@@ -946,7 +986,8 @@ class LayoutRuleEngine:
                 current = fix_result.fixed_layout
 
             # 2. 带重定位的尺寸优化
-            current = self.optimize_dimensions_with_reposition(current, full_layout)
+            current = self.optimize_dimensions_with_reposition(
+                current, full_layout)
 
             # 3. 客厅位置修正（与卧室交换）
             current = self.fix_living_room_position(current, full_layout)
@@ -960,75 +1001,52 @@ class LayoutRuleEngine:
             # 6. 空间填充扩张（迭代扩大房间以填充空白）
             current = self.expand_rooms_to_fill(current, full_layout)
 
+            # 7. 网格对齐（300mm建筑模数）
+            current = self.snap_to_grid(current, full_layout)
+
             # 检查是否有变化，无变化则提前终止
             if all(current.get(k) == before.get(k) for k in set(current) | set(before)):
                 break
 
         return current
 
-    def _get_room_type(self, room_name: str) -> str:
-        """从房间名获取房间类型（支持更多变体名称）"""
-        type_mappings = {
-            "主卧": ["主卧", "主卧室"],
-            "卧室": ["卧室", "卧室1", "卧室2", "卧室3", "卧室4", "卧室5",
-                     "次卧", "次卧1", "次卧2", "客卧", "书房卧室"],
-            "客厅": ["客厅", "起居室", "客餐厅"],
-            "厨房": ["厨房", "厨房1", "中厨", "西厨", "开放厨房"],
-            "卫生间": ["卫生间", "卫生间1", "卫生间2", "公卫", "次卫", "公共卫生间"],
-            "主卫": ["主卫", "主卫生间"],
-            "餐厅": ["餐厅", "餐厅1", "饭厅"],
-            "储藏": ["储藏", "储藏室", "储物间", "杂物间", "收纳间"],
-            "阳台": ["阳台", "阳台1", "阳台2", "生活阳台", "景观阳台"],
-        }
-        
-        # 精确匹配
-        for room_type, names in type_mappings.items():
-            if room_name in names:
-                return room_type
-        
-        # 模糊匹配（先匹配更具体的类型，避免"主卧"被匹配为"卧室"）
-        priority_order = ["主卧", "主卫", "卫生间", "卧室", "客厅", "厨房", "餐厅", "储藏", "阳台"]
-        for room_type in priority_order:
-            if room_type in room_name:
-                return room_type
-        
-        return room_name
-    
+    @staticmethod
+    def _get_room_type(room_name: str) -> str:
+        """从房间名获取房间类型（委托给 common.get_room_type）"""
+        return get_room_type(room_name)
+
     # ==================== 硬性规则 ====================
-    
+
     def no_room_overlap(
-        self, 
-        rooms: List[Room], 
+        self,
+        rooms: List[Room],
         boundary: Optional[Room],
         all_rooms: Dict[str, Room]
     ) -> Dict[str, Any]:
         """硬性规则：房间不能重叠（含基础设施）"""
         violations = []
-        
+
         # 房间之间重叠
         for i, room1 in enumerate(rooms):
             for room2 in rooms[i+1:]:
                 if room1.overlaps(room2):
                     violations.append(f"房间重叠: {room1.name} 与 {room2.name}")
-        
+
         # 房间与基础设施重叠（采光区、黑体、主入口）
-        dir_prefixes = ('南采光', '北采光', '东采光', '西采光')
-        infra_prefixes = ('采光', '黑体', '主入口')
         for room in rooms:
             for infra_name, infra_room in all_rooms.items():
-                if infra_name == '边界' or infra_name == room.name:
+                if infra_name == BOUNDARY_NAME or infra_name == room.name:
                     continue
-                if any(infra_name.startswith(p) for p in dir_prefixes):
+                if is_directional_lighting(infra_name):
                     continue
-                is_infra = any(infra_name.startswith(p) for p in infra_prefixes)
-                if is_infra and room.overlaps(infra_room):
+                if is_infrastructure(infra_name) and room.overlaps(infra_room):
                     violations.append(f"房间与基础设施重叠: {room.name} 与 {infra_name}")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     def within_boundary(
         self,
         rooms: List[Room],
@@ -1037,18 +1055,17 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """硬性规则：房间不能超出边界"""
         violations = []
-        
+
         if boundary:
             for room in rooms:
-                if room.x < boundary.x or room.y < boundary.y or \
-                   room.x2 > boundary.x2 or room.y2 > boundary.y2:
+                if not room.is_within(boundary):
                     violations.append(f"超出边界: {room.name}")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     def minimum_dimensions(
         self,
         rooms: List[Room],
@@ -1057,28 +1074,28 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """硬性规则：房间尺寸不能小于最小要求"""
         violations = []
-        
+
         for room in rooms:
             room_type = self._get_room_type(room.name)
-            
+
             if room_type in self.space_constraints:
                 constraints = self.space_constraints[room_type]
                 min_width = constraints.get('min_width', 0)
                 min_length = constraints.get('min_length', 0)
-                
+
                 actual_width = min(room.width, room.height)
                 actual_length = max(room.width, room.height)
-                
+
                 if actual_width < min_width * 0.8:  # 允许20%容差
                     violations.append(f"宽度严重不足: {room.name}")
                 if actual_length < min_length * 0.8:
                     violations.append(f"长度严重不足: {room.name}")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     def positive_dimensions(
         self,
         rooms: List[Room],
@@ -1087,18 +1104,18 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """硬性规则：尺寸必须为正数"""
         violations = []
-        
+
         for room in rooms:
             if room.width <= 0 or room.height <= 0:
                 violations.append(f"无效尺寸: {room.name}")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     # ==================== 软性规则 ====================
-    
+
     def kitchen_bathroom_separate(
         self,
         rooms: List[Room],
@@ -1107,20 +1124,21 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """软性规则：厨房与卫生间应分离"""
         violations = []
-        
+
         kitchen = next((r for r in rooms if "厨房" in r.name), None)
         bathrooms = [r for r in rooms if "卫" in r.name]
-        
+
         if kitchen:
             for bathroom in bathrooms:
                 if kitchen.is_adjacent(bathroom, tolerance=200):
-                    violations.append(f"厨卫相邻: {kitchen.name} 与 {bathroom.name}")
-        
+                    violations.append(
+                        f"厨卫相邻: {kitchen.name} 与 {bathroom.name}")
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     def bedroom_near_lighting(
         self,
         rooms: List[Room],
@@ -1129,30 +1147,30 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """软性规则：卧室应靠近采光面"""
         violations = []
-        
+
         # 获取采光面
         lighting_surfaces = [
-            r for name, r in all_rooms.items() 
+            r for name, r in all_rooms.items()
             if "采光" in name
         ]
-        
+
         bedrooms = [r for r in rooms if "卧" in r.name]
-        
+
         for bedroom in bedrooms:
             near_lighting = False
             for surface in lighting_surfaces:
                 if bedroom.is_adjacent(surface, tolerance=500):
                     near_lighting = True
                     break
-            
+
             if not near_lighting and lighting_surfaces:
                 violations.append(f"采光不足: {bedroom.name}")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
         }
-    
+
     def reasonable_proportions(
         self,
         rooms: List[Room],
@@ -1161,13 +1179,14 @@ class LayoutRuleEngine:
     ) -> Dict[str, Any]:
         """软性规则：房间长宽比应合理"""
         violations = []
-        
+
         for room in rooms:
             if room.width > 0 and room.height > 0:
-                ratio = max(room.width, room.height) / min(room.width, room.height)
+                ratio = max(room.width, room.height) / \
+                    min(room.width, room.height)
                 if ratio > 4:  # 长宽比超过4:1
                     violations.append(f"比例失调: {room.name} (长宽比 {ratio:.1f}:1)")
-        
+
         return {
             'passed': len(violations) == 0,
             'violations': violations
