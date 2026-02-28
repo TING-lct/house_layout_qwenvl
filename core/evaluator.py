@@ -95,11 +95,12 @@ class LayoutEvaluator:
                 'require_lighting': ["客厅", "卧室", "主卧"]
             },
             'penalty_scores': {
-                'room_overlap': 30,
-                'boundary_exceed': 25,
-                'min_size_violation': 20,
-                'forbidden_adjacent': 15,
-                'no_lighting': 10
+                'room_overlap': 20,
+                'infra_overlap': 15,
+                'boundary_exceed': 20,
+                'min_size_violation': 15,
+                'forbidden_adjacent': 12,
+                'no_lighting': 8
             }
         }
 
@@ -254,7 +255,8 @@ class LayoutEvaluator:
             for room in rooms:
                 for infra_room in parsed_full.infra:
                     if room.overlaps(infra_room):
-                        score -= self.penalties.get('room_overlap', 30)
+                        score -= self.penalties.get('infra_overlap',
+                                                    self.penalties.get('room_overlap', 20))
                         issues.append(
                             f"房间与基础设施重叠: {room.name} 与 {infra_room.name}")
 
@@ -267,12 +269,13 @@ class LayoutEvaluator:
                 infra_area = sum(r.area for r in parsed_full_cov.infra)
             available_area = max(boundary.area - infra_area, 1)
             coverage = total_room_area / available_area
-            if coverage < 0.60:
-                score -= 15
+            if coverage < 0.50:
+                score -= 10
                 issues.append(f"空间覆盖率严重不足({coverage:.0%})，存在大面积空白")
-            elif coverage < 0.70:
-                score -= 8
+            elif coverage < 0.60:
+                score -= 5
                 issues.append(f"空间覆盖率偏低({coverage:.0%})")
+            # 注意：60%以上的覆盖率是正常的，墙体/走廊/过渡区需要占用空间
 
         return max(0, score), issues
 
@@ -362,9 +365,18 @@ class LayoutEvaluator:
 
                 distance = self._calculate_distance(entry, living_room)
                 if distance > dist_threshold:
-                    score -= 40
+                    # 渐进扣分：超出越多扣越多，但封顶30分
+                    exceed_ratio = (distance - dist_threshold) / \
+                        max(dist_threshold, 1)
+                    penalty = min(30, 10 + exceed_ratio * 20)
+                    score -= penalty
                     issues.append(
                         f"客厅距离入口过远({distance:.0f}mm，阈值{dist_threshold:.0f}mm)")
+                elif distance > dist_threshold * 0.8:
+                    # 轻微扣分：接近阈值时给出提醒
+                    score -= 5
+                    issues.append(
+                        f"客厅距离入口偏远({distance:.0f}mm，建议<{dist_threshold:.0f}mm)")
 
         return max(0, score), issues
 
@@ -453,17 +465,21 @@ class LayoutEvaluator:
                         f"面积不足: {room.name} (最小{min_area/1000000:.1f}平米)")
 
                 if room.area > max_area:
-                    score -= 10
+                    score -= 15
                     issues.append(
                         f"面积过大: {room.name} ({room.area/1000000:.1f}平米，最大{max_area/1000000:.1f}平米)")
 
-            # 检查长宽比（所有房间，超过4:1视为比例失调）
+            # 检查长宽比
             if room.width > 0 and room.height > 0:
                 ratio = max(room.width, room.height) / \
                     min(room.width, room.height)
                 if ratio > 4.0:
                     score -= 10
                     issues.append(f"比例失调: {room.name} (长宽比{ratio:.1f}:1)")
+                elif ratio > 3.0:
+                    score -= 5
+                    issues.append(
+                        f"比例偏长: {room.name} (长宽比{ratio:.1f}:1，建议≤3:1)")
 
         return max(0, score), issues
 

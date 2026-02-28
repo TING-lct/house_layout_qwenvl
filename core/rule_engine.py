@@ -239,6 +239,9 @@ class LayoutRuleEngine:
         if len(room_names) != 2:
             return layout
 
+        # 对于基础设施重叠，使用更大搜索范围
+        is_infra_overlap = "基础设施" in violation
+
         room1_name = room_names[0].strip()
         room2_name = room_names[1].strip()
 
@@ -266,7 +269,11 @@ class LayoutRuleEngine:
         best_pos = None
         best_dist = float('inf')
 
-        for step in [300, 600, 900, 1200, 1800, 2400, 3600]:
+        # 基础设施重叠需要更大搜索范围
+        steps = ([300, 600, 900, 1200, 1800, 2400, 3600, 4800, 6000]
+                 if is_infra_overlap else
+                 [300, 600, 900, 1200, 1800, 2400, 3600])
+        for step in steps:
             if best_pos is not None:
                 break  # 已找到最小位移解
             for dx, dy in directions:
@@ -439,7 +446,7 @@ class LayoutRuleEngine:
         layout: Dict[str, List[int]],
         full_layout: Optional[Dict[str, List[int]]] = None,
         step: int = 300,
-        max_rounds: int = 20,
+        max_rounds: int = 10,
         max_area_ratios: Optional[Dict[str, float]] = None
     ) -> Dict[str, List[int]]:
         """
@@ -457,7 +464,7 @@ class LayoutRuleEngine:
             layout: 生成的房间布局
             full_layout: 完整布局（含边界、采光等）
             step: 每次扩张步长(mm)，默认300
-            max_rounds: 最大迭代轮数，默认20
+            max_rounds: 最大迭代轮数，默认10
             max_area_ratios: 各房间类型的最大面积(mm²)覆盖，默认从rules.yaml读取
         """
         fixed = {k: v.copy() for k, v in layout.items()}
@@ -484,6 +491,17 @@ class LayoutRuleEngine:
             [n for n in fixed if is_normal_room(n)],
             key=_sort_key
         )
+
+        # 动态面积上限：按边界可用面积等比分配，防止单房间过度膨胀
+        proportional_limit = float('inf')
+        avg_area = float('inf')
+        if boundary and room_names:
+            usable_area = boundary.area
+            for n, p in combined_base.items():
+                if is_infrastructure(n) and len(p) == 4:
+                    usable_area -= p[2] * p[3]
+            avg_area = usable_area / max(len(room_names), 1)
+            proportional_limit = avg_area * 2.0  # 单个房间最多占平均面积的2倍
 
         bx1, by1 = boundary.x, boundary.y
         bx2, by2 = boundary.x2, boundary.y2
@@ -524,15 +542,19 @@ class LayoutRuleEngine:
                     if new_params[1] + new_params[3] > by2:
                         continue
 
-                    # 面积上限检查
+                    # 面积上限检查（取类型限制和比例限制的较小值）
                     new_area = new_params[2] * new_params[3]
-                    if new_area > area_limit:
+                    effective_limit = min(area_limit, proportional_limit)
+                    if rt == "客厅":
+                        effective_limit = min(
+                            area_limit, avg_area * 2.5 if boundary else float('inf'))
+                    if new_area > effective_limit:
                         continue
 
-                    # 长宽比检查（不超过4:1）
+                    # 长宽比检查（不超过3:1，避免过于狭长）
                     ratio = max(new_params[2], new_params[3]) / \
                         max(min(new_params[2], new_params[3]), 1)
-                    if ratio > 4.0:
+                    if ratio > 3.0:
                         continue
 
                     # 重叠检查
@@ -846,7 +868,13 @@ class LayoutRuleEngine:
                            width=lp[2], height=lp[3])
         living_dist = self._calc_dist(entry.center, living_room.center)
 
-        if living_dist <= 5000:
+        # 自适应阈值：边界对角线的45%，范围3000-8000mm
+        dist_threshold = 5000
+        if boundary:
+            diag = (boundary.width**2 + boundary.height**2)**0.5
+            dist_threshold = max(3000, min(8000, diag * 0.45))
+
+        if living_dist <= dist_threshold:
             return fixed  # 已经足够近
 
         # 找所有卧室，并筛选比客厅更近入口的
@@ -857,7 +885,7 @@ class LayoutRuleEngine:
             bp = fixed[name]
             br = Room(name=name, x=bp[0], y=bp[1], width=bp[2], height=bp[3])
             d = self._calc_dist(entry.center, br.center)
-            if d < living_dist - 1000:  # 至少近 1000mm 才值得交换
+            if d < living_dist * 0.7:  # 至少近30%才值得交换
                 swap_candidates.append((name, d))
 
         # 按距离入口从近到远排序
@@ -957,6 +985,106 @@ class LayoutRuleEngine:
 
         return fixed
 
+    def fix_infrastructure_overlaps(
+        self,
+        layout: Dict[str, List[int]],
+        full_layout: Dict[str, List[int]] = None
+    ) -> Dict[str, List[int]]:
+        """
+        专门修复房间与基础设施（采光区、黑体区、主入口）的重叠。
+        策略：计算推离向量，优先将房间沿远离基础设施中心的方向移动。
+        如果直接推离后仍有重叠，则在边界内网格搜索可行位置。
+        """
+        fixed = {k: v.copy() for k, v in layout.items()}
+        combined_base = dict(full_layout or {})
+        _, boundary, all_rooms = self.parse_layout({**combined_base, **fixed})
+
+        # 获取所有基础设施
+        infra_list = []
+        for name, params in (full_layout or {}).items():
+            if is_infrastructure(name) and len(params) == 4:
+                infra_list.append(Room(name=name, x=params[0], y=params[1],
+                                       width=params[2], height=params[3]))
+
+        if not infra_list:
+            return fixed
+
+        for room_name in list(fixed.keys()):
+            if not is_normal_room(room_name):
+                continue
+            params = fixed[room_name]
+            room = Room(name=room_name, x=params[0], y=params[1],
+                        width=params[2], height=params[3])
+
+            for infra in infra_list:
+                if not room.overlaps(infra):
+                    continue
+
+                # 计算四个推离方向的距离
+                # 向右推离：room.x = infra.x2
+                # 向左推离：room.x = infra.x - room.width
+                # 向下推离：room.y = infra.y2
+                # 向上推离：room.y = infra.y - room.height
+                candidates = []
+                # 右
+                nx = infra.x2
+                if not boundary or nx + params[2] <= boundary.x2:
+                    candidates.append(([nx, params[1], params[2], params[3]],
+                                       abs(nx - params[0])))
+                # 左
+                nx = infra.x - params[2]
+                if not boundary or nx >= boundary.x:
+                    candidates.append(([nx, params[1], params[2], params[3]],
+                                       abs(nx - params[0])))
+                # 下 (y+)
+                ny = infra.y2
+                if not boundary or ny + params[3] <= boundary.y2:
+                    candidates.append(([params[0], ny, params[2], params[3]],
+                                       abs(ny - params[1])))
+                # 上 (y-)
+                ny = infra.y - params[3]
+                if not boundary or ny >= boundary.y:
+                    candidates.append(([params[0], ny, params[2], params[3]],
+                                       abs(ny - params[1])))
+
+                # 按位移距离排序，选第一个不重叠的
+                candidates.sort(key=lambda c: c[1])
+                placed = False
+                for cand_params, _ in candidates:
+                    if not self._would_overlap(room_name, cand_params, fixed, combined_base):
+                        params[:] = cand_params
+                        placed = True
+                        break
+
+                if not placed:
+                    # 网格搜索：在边界内每300mm搜索一个可行位置
+                    if boundary:
+                        best_pos = None
+                        best_d = float('inf')
+                        orig_cx = params[0] + params[2] / 2
+                        orig_cy = params[1] + params[3] / 2
+                        for gx in range(boundary.x, boundary.x2 - params[2] + 1, 300):
+                            for gy in range(boundary.y, boundary.y2 - params[3] + 1, 300):
+                                test = [gx, gy, params[2], params[3]]
+                                test_room = Room(name=room_name, x=gx, y=gy,
+                                                 width=params[2], height=params[3])
+                                if test_room.overlaps(infra):
+                                    continue
+                                if not self._would_overlap(room_name, test, fixed, combined_base):
+                                    d = abs(
+                                        gx + params[2]/2 - orig_cx) + abs(gy + params[3]/2 - orig_cy)
+                                    if d < best_d:
+                                        best_d = d
+                                        best_pos = test
+                        if best_pos:
+                            params[:] = best_pos
+
+                # 更新room对象以检查下一个infra
+                room = Room(name=room_name, x=params[0], y=params[1],
+                            width=params[2], height=params[3])
+
+        return fixed
+
     def aggressive_post_process(
         self,
         layout: Dict[str, List[int]],
@@ -984,6 +1112,9 @@ class LayoutRuleEngine:
             fix_result = self.validate_and_fix(current, full_layout)
             if fix_result.fixed_layout:
                 current = fix_result.fixed_layout
+
+            # 1.5. 专门修复基础设施重叠（黑体/采光区/主入口）
+            current = self.fix_infrastructure_overlaps(current, full_layout)
 
             # 2. 带重定位的尺寸优化
             current = self.optimize_dimensions_with_reposition(
@@ -1086,9 +1217,9 @@ class LayoutRuleEngine:
                 actual_width = min(room.width, room.height)
                 actual_length = max(room.width, room.height)
 
-                if actual_width < min_width * 0.8:  # 允许20%容差
+                if actual_width < min_width * 0.65:  # 允许35%容差（硬性规则仅拦截极端情况）
                     violations.append(f"宽度严重不足: {room.name}")
-                if actual_length < min_length * 0.8:
+                if actual_length < min_length * 0.65:
                     violations.append(f"长度严重不足: {room.name}")
 
         return {

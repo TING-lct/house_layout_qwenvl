@@ -635,7 +635,11 @@ class LayoutPredictor:
                         new_validation = self.rule_engine.validate(
                             cur, existing_layout
                         )
-                        if new_eval.total_score >= c['score']:
+                        # 接受修复结果的条件：得分提升 或 规则由不通过变为通过
+                        improved_score = new_eval.total_score >= c['score']
+                        fixed_rules = (not c['is_rule_valid']
+                                       ) and new_validation.valid
+                        if improved_score or fixed_rules:
                             c['layout'] = cur
                             c['score'] = new_eval.total_score
                             c['evaluation'] = new_eval
@@ -692,7 +696,8 @@ class LayoutPredictor:
                 current_query = self._build_fix_query(
                     original_query=query,
                     current_layout=round_layout,
-                    issues=round_eval.issues
+                    issues=round_eval.issues,
+                    existing_layout=existing_layout
                 )
                 logger.info("  📋 已注入 %d 个问题到下一轮Prompt", len(round_eval.issues))
 
@@ -755,7 +760,8 @@ class LayoutPredictor:
         self,
         original_query: str,
         current_layout: Dict[str, List[int]],
-        issues: List[str]
+        issues: List[str],
+        existing_layout: Optional[Dict[str, List[int]]] = None
     ) -> str:
         """
         构造迭代修正查询：将评估问题转化为具体可操作的数值修正指令，
@@ -805,11 +811,48 @@ class LayoutPredictor:
                 else:
                     fix_instructions.append(issue)
             elif "重叠" in issue:
-                fix_instructions.append(issue + "，请调整坐标使其不交叉")
+                # 区分基础设施重叠 vs 房间间重叠，给出具体坐标
+                if "基础设施" in issue:
+                    # 提取基础设施名和房间名，给出禁区范围
+                    import re as _re
+                    m = _re.search(r'(\S+)\s*与\s*(\S+)', issue)
+                    if m:
+                        rname, iname = m.group(1), m.group(2)
+                        infra_params = None
+                        _el = existing_layout or {}
+                        for full_key in list(_el.keys()):
+                            if iname in full_key:
+                                infra_params = _el.get(full_key)
+                                break
+                        if infra_params:
+                            fix_instructions.append(
+                                f"{rname}与{iname}区域[{infra_params}]重叠，"
+                                f"请将{rname}移到该矩形区域之外"
+                            )
+                        else:
+                            fix_instructions.append(issue + "，请将房间移到基础设施区域之外")
+                    else:
+                        fix_instructions.append(issue + "，请将房间移到基础设施区域之外")
+                else:
+                    fix_instructions.append(issue + "，请调整坐标使其不交叉")
             elif "超出边界" in issue:
                 fix_instructions.append(issue + "，请缩小尺寸或移动位置")
             elif "采光不足" in issue:
                 fix_instructions.append(issue + "，请将其移到靠近采光面的位置")
+            elif "入口" in issue and "客厅" in issue:
+                # 提供入口坐标帮助模型定位
+                entry_params = None
+                _el = existing_layout or {}
+                for ek, ev in _el.items():
+                    if "入口" in ek:
+                        entry_params = ev
+                        break
+                if entry_params:
+                    fix_instructions.append(
+                        f"客厅应靠近主入口[{entry_params}]，请将客厅移到入口附近"
+                    )
+                else:
+                    fix_instructions.append("客厅应靠近入口，请调整位置")
             elif "不宜相邻" in issue:
                 fix_instructions.append(issue + "，请拉开它们的距离")
             else:
@@ -854,6 +897,11 @@ _ROOM_SIZE_SPEC = {
     "卫生间": {"w": 1500, "l": 2100, "a": 3.15},
     "主卫":   {"w": 1800, "l": 2400, "a": 4.32},
     "餐厅":   {"w": 1500, "l": 2000, "a": 3.0},
+    "储藏":   {"w": 1200, "l": 1500, "a": 1.8},
+    "玄关":   {"w": 1200, "l": 1500, "a": 1.8},
+    "楼梯":   {"w": 2100, "l": 2400, "a": 5.04},
+    "门廊":   {"w": 1200, "l": 2400, "a": 2.88},
+    "次入口": {"w": 600,  "l": 600,  "a": 0.36},
 }
 
 

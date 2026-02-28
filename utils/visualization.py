@@ -280,7 +280,7 @@ class LayoutVisualizer:
                 elif is_infra:
                     # 基础设施/采光区：名称+面积，较小字号，斜体
                     if show_dimensions:
-                        label = f"{name}\n{area:.1f}m²"
+                        label = f"{name}\n{area:.1f}m2"
                     else:
                         label = name
                     ax.text(center_x, center_y, label,
@@ -291,7 +291,7 @@ class LayoutVisualizer:
                 else:
                     # 普通房间：名称+面积+尺寸
                     if show_dimensions:
-                        label = f"{name}\n{area:.1f}m²\n{w}×{h}"
+                        label = f"{name}\n{area:.1f}m2\n{w}×{h}"
                     else:
                         label = name
                     ax.text(center_x, center_y, label,
@@ -488,7 +488,7 @@ class LayoutVisualizer:
                         fontproperties=self.font, color='#555555', style='italic')
             else:
                 area_val = w * h / 1000000
-                ax.text(center_x, center_y, f"{name}\n{area_val:.1f}m²",
+                ax.text(center_x, center_y, f"{name}\n{area_val:.1f}m2",
                         ha='center', va='center', fontsize=6,
                         fontproperties=self.font, fontweight='bold')
 
@@ -560,7 +560,7 @@ def visualize_evaluation_result(
                      fontproperties=visualizer.font, color='#555555', style='italic')
         else:
             area_val = w * h / 1000000
-            ax1.text(center_x, center_y, f"{name}\n{area_val:.1f}m²",
+            ax1.text(center_x, center_y, f"{name}\n{area_val:.1f}m2",
                      ha='center', va='center', fontsize=8,
                      fontproperties=visualizer.font, fontweight='bold')
 
