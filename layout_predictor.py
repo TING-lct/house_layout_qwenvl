@@ -635,22 +635,35 @@ class LayoutPredictor:
                         new_validation = self.rule_engine.validate(
                             cur, existing_layout
                         )
-                        # 接受修复结果的条件：得分提升 或 规则由不通过变为通过
-                        improved_score = new_eval.total_score >= c['score']
-                        fixed_rules = (not c['is_rule_valid']
-                                       ) and new_validation.valid
-                        if improved_score or fixed_rules:
-                            c['layout'] = cur
-                            c['score'] = new_eval.total_score
-                            c['evaluation'] = new_eval
-                            c['is_rule_valid'] = new_validation.valid
+                        # 无条件接受修复结果（修复流程不会恶化布局）
+                        c['layout'] = cur
+                        c['score'] = new_eval.total_score
+                        c['evaluation'] = new_eval
+                        c['is_rule_valid'] = new_validation.valid
+                        # 打印修复后状态
+                        fix_status = "✅" if new_validation.valid else "⚠️"
+                        logger.info("    候选%d修复后: %s 得分=%.1f, 规则通过=%s%s",
+                                    c['index'] +
+                                    1, fix_status, new_eval.total_score,
+                                    new_validation.valid,
+                                    f" 残余违规={new_validation.hard_violations}" if not new_validation.valid else "")
                     except Exception as e:
                         logger.warning("    候选%d 修复异常: %s", c['index'] + 1, e)
 
-            round_best = max(candidate_details, key=lambda x: x['score'])
+            # 选择最优：优先选规则通过的，其次选得分最高的
+            valid_candidates = [
+                c for c in candidate_details if c['is_rule_valid']]
+            if valid_candidates:
+                round_best = max(valid_candidates, key=lambda x: x['score'])
+            else:
+                round_best = max(candidate_details, key=lambda x: x['score'])
 
-            logger.info("  🏆 本轮最优: 候选%d, 得分=%.1f",
-                        round_best['index'] + 1, round_best['score'])
+            rule_status = "✅规则通过" if round_best['is_rule_valid'] else "⚠️规则未通过"
+            num_valid = sum(1 for c in candidate_details if c['is_rule_valid'])
+            logger.info("  🏆 本轮最优: 候选%d, 得分=%.1f, %s (通过率=%d/%d)",
+                        round_best['index'] +
+                        1, round_best['score'], rule_status,
+                        num_valid, len(candidate_details))
 
             iter_info['best_score'] = round_best['score']
             iter_info['issues'] = round_best['evaluation'].issues

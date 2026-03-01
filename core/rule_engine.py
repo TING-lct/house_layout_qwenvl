@@ -143,7 +143,7 @@ class LayoutRuleEngine:
         self,
         layout: Dict[str, List[int]],
         full_layout: Optional[Dict[str, List[int]]] = None,
-        max_attempts: int = 3
+        max_attempts: int = 5
     ) -> ValidationResult:
         """
         验证并尝试修复布局
@@ -157,6 +157,7 @@ class LayoutRuleEngine:
             ValidationResult: 验证结果（包含修复后的布局）
         """
         current_layout = layout.copy()
+        prev_violation_count = float('inf')
 
         for attempt in range(max_attempts):
             result = self.validate(current_layout, full_layout)
@@ -165,6 +166,25 @@ class LayoutRuleEngine:
                 result.fixed_layout = current_layout
                 result.fix_applied = (attempt > 0)
                 return result
+
+            # 如果违规数没有减少，尝试更激进的修复策略
+            cur_violation_count = len(result.hard_violations)
+            if attempt >= 2 and cur_violation_count >= prev_violation_count:
+                # 尝试基础设施重叠专项修复
+                current_layout = self.fix_infrastructure_overlaps(
+                    current_layout, full_layout)
+                # 尝试边界强制修复
+                if full_layout:
+                    combined = {**full_layout, **current_layout}
+                else:
+                    combined = current_layout
+                _, boundary, _ = self.parse_layout(combined)
+                if boundary:
+                    for name in list(current_layout.keys()):
+                        params = current_layout[name]
+                        if len(params) == 4:
+                            self._clamp_boundary(params, boundary)
+            prev_violation_count = cur_violation_count
 
             # 尝试修复
             current_layout = self.auto_fix(
@@ -187,7 +207,7 @@ class LayoutRuleEngine:
         full_layout: Dict[str, List[int]] = None
     ) -> Dict[str, List[int]]:
         """
-        自动修复违规项
+        自动修复违规项（增强版：迭代修复，每次修复后重新检测）
 
         Args:
             layout: 当前布局
@@ -207,7 +227,18 @@ class LayoutRuleEngine:
 
         _, boundary, _ = self.parse_layout(combined)
 
-        for violation in violations:
+        # 按优先级排序：先修边界越界（简单），再修重叠（复杂），最后尺寸
+        priority = {"超出边界": 0, "尺寸": 1, "重叠": 2}
+
+        def _violation_priority(v):
+            for key, p in priority.items():
+                if key in v:
+                    return p
+            return 10
+
+        sorted_violations = sorted(violations, key=_violation_priority)
+
+        for violation in sorted_violations:
             if "重叠" in violation:
                 fixed_layout = self._fix_overlap(
                     fixed_layout, violation, boundary, full_layout)
@@ -1134,6 +1165,16 @@ class LayoutRuleEngine:
 
             # 7. 网格对齐（300mm建筑模数）
             current = self.snap_to_grid(current, full_layout)
+
+            # 8. 最终校验：如果扩张/对齐引入了新重叠，再做一轮修复
+            final_check = self.validate(current, full_layout)
+            if not final_check.valid:
+                repair = self.validate_and_fix(current, full_layout)
+                if repair.fixed_layout:
+                    current = repair.fixed_layout
+                # 修复基础设施重叠
+                current = self.fix_infrastructure_overlaps(
+                    current, full_layout)
 
             # 检查是否有变化，无变化则提前终止
             if all(current.get(k) == before.get(k) for k in set(current) | set(before)):
