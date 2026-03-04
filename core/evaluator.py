@@ -89,6 +89,7 @@ class LayoutEvaluator:
                 'forbidden_pairs': [
                     ["厨房", "卫生间"],
                     ["厨房", "主卫"],
+                    ["主卫", "卫生间"],
                 ]
             },
             'lighting_rules': {

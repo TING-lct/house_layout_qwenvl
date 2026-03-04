@@ -549,6 +549,7 @@ class LayoutPredictor:
         history: List[Dict[str, Any]] = []
 
         current_query = query  # 初始查询
+        consecutive_no_improve = 0  # 连续未改进轮数计数
 
         for iteration in range(max_iterations):
             iter_info = {
@@ -561,12 +562,21 @@ class LayoutPredictor:
             logger.info("=" * 50)
 
             # ========== 第1步：多候选生成 ==========
+            # 温度轮换：后续轮次偏移温度分布以增加多样性
+            iter_temps = None
+            if iteration > 0:
+                base_temps = [0.2, 0.4, 0.6, 0.75, 0.9]
+                offset = iteration * 0.08
+                iter_temps = [min(t + offset, 1.0)
+                              for t in base_temps[:num_candidates]]
+
             logger.info("  📝 生成 %d 个候选...", num_candidates)
             candidates = self.generate_candidates(
                 image_path=image_path,
                 query=current_query,
                 existing_layout=existing_layout,
-                num_candidates=num_candidates
+                num_candidates=num_candidates,
+                temperatures=iter_temps
             )
             total_candidates += len(candidates)
             iter_info['num_candidates'] = len(candidates)
@@ -625,10 +635,9 @@ class LayoutPredictor:
                         cur = self.rule_engine.optimize_dimensions(
                             cur, existing_layout
                         )
-                        # 激进后处理：边界吸附 + 相邻修复 + 带重定位尺寸优化
-                        cur = self.rule_engine.aggressive_post_process(
-                            cur, existing_layout
-                        )
+                        # 注意：迭代过程中不对每个候选执行 aggressive_post_process
+                        # 原因：该操作是确定性的，会将所有候选推向相同结果，抹平差异
+                        # aggressive_post_process 仅在选出最优后执行一次
                         # 重新评分 + 重新校验规则
                         new_eval = self.evaluator.evaluate(
                             cur, existing_layout
@@ -673,6 +682,15 @@ class LayoutPredictor:
             round_raw = round_best['raw_output']
             round_eval = round_best['evaluation']
 
+            # ========== 第4.5步：仅对本轮最优候选执行激进后处理 ==========
+            if auto_fix:
+                round_layout = self.rule_engine.aggressive_post_process(
+                    round_layout, existing_layout
+                )
+                round_eval = self.evaluator.evaluate(
+                    round_layout, existing_layout)
+                logger.info("  🔧 最优候选后处理: 得分=%.1f", round_eval.total_score)
+
             # ========== 第5步：更新全局最优 ==========
             if round_eval.total_score > best_score:
                 improvement = round_eval.total_score - best_score
@@ -680,11 +698,14 @@ class LayoutPredictor:
                 best_raw_output = round_raw
                 best_score = round_eval.total_score
                 best_eval = round_eval
+                consecutive_no_improve = 0
                 logger.info("  ⬆️ 全局最优更新: %.1f (+%.1f)",
                             best_score, improvement)
                 iter_info['improvement'] = improvement
             else:
-                logger.info("  ➡️ 全局最优未变: %.1f", best_score)
+                consecutive_no_improve += 1
+                logger.info("  ➡️ 全局最优未变: %.1f (连续%d轮未改进)",
+                            best_score, consecutive_no_improve)
                 iter_info['improvement'] = 0
 
             history.append(iter_info)
@@ -694,16 +715,17 @@ class LayoutPredictor:
                 logger.info("  ✅ 达到满意阈值 (%.1f), 停止优化", score_threshold)
                 break
 
-            # 检查收敛（仅在无剩余问题时允许因改进不足停止）
-            has_issues = bool(best_eval and best_eval.issues)
+            # 连续2轮无改进 → 模型迭代已无法进一步提升，果断停止
+            if consecutive_no_improve >= 2:
+                logger.info("  📉 连续 %d 轮未改进, 模型迭代已收敛, 停止优化",
+                            consecutive_no_improve)
+                break
+
+            # 单轮改进幅度不足但尚未触发连续停止，记录日志
             if iteration > 0 and iter_info.get('improvement', 0) < improvement_threshold:
-                if not has_issues:
-                    logger.info("  📉 改进幅度不足且无剩余问题, 停止优化")
-                    break
-                else:
-                    num_issues = len(best_eval.issues) if best_eval else 0
-                    logger.info("  📉 改进幅度不足 (%.1f), 但仍有 %d 个问题, 继续迭代",
-                                iter_info.get('improvement', 0), num_issues)
+                num_issues = len(best_eval.issues) if best_eval else 0
+                logger.info("  📉 本轮改进不足 (%.1f < %.1f), 剩余问题=%d, 继续尝试",
+                            iter_info.get('improvement', 0), improvement_threshold, num_issues)
 
             # ========== 第7步：构造修正Prompt ==========
             if iteration < max_iterations - 1 and round_eval.issues:
@@ -786,9 +808,21 @@ class LayoutPredictor:
         """
         import re
 
+        # 过滤非模型可修复的issue（覆盖率、紧凑度、面积偏差由后处理解决）
+        _POST_PROCESS_ONLY_KEYWORDS = ("覆盖率", "紧凑", "面积偏差")
+        model_fixable_issues = [
+            issue for issue in issues
+            if not any(kw in issue for kw in _POST_PROCESS_ONLY_KEYWORDS)
+        ]
+
+        # 如果没有模型可修复的问题，直接返回原始query（避免无效迭代）
+        if not model_fixable_issues:
+            logger.info("  ℹ️ 剩余问题均为后处理可修复，不注入修正指令")
+            return original_query
+
         # 将问题转化为具体修正指令
         fix_instructions = []
-        for issue in issues[:6]:  # 最多6条，避免过长
+        for issue in model_fixable_issues[:5]:  # 最多5条，避免过长
             if "宽度不足" in issue or "长度不足" in issue:
                 # 从 issue 提取房间名和最小值
                 m = re.search(r'(宽度|长度)不足.*?:\s*(\S+)\s*\(最小(\d+)mm\)', issue)
@@ -835,8 +869,6 @@ class LayoutPredictor:
                     )
                 else:
                     fix_instructions.append(issue + "，请缩小房间尺寸")
-            elif "面积偏差" in issue:
-                fix_instructions.append(issue + "，请调整尺寸接近理想值")
             elif "重叠" in issue:
                 # 区分基础设施重叠 vs 房间间重叠，给出具体坐标
                 if "基础设施" in issue:
@@ -882,10 +914,6 @@ class LayoutPredictor:
                     fix_instructions.append("客厅应靠近入口，请调整位置")
             elif "不宜相邻" in issue:
                 fix_instructions.append(issue + "，请拉开它们的距离")
-            elif "紧凑" in issue:
-                fix_instructions.append("房间之间间隙过大，请让相邻房间紧贴排列")
-            elif "覆盖率" in issue:
-                fix_instructions.append(issue + "，请增大房间尺寸或调整位置以填充空白")
             else:
                 fix_instructions.append(issue)
 
@@ -1012,6 +1040,7 @@ def build_query(
         constraints.append(f"尺寸要求：{size_text}")
 
     constraints.append("厨房不宜与卫生间直接相邻")
+    constraints.append("主卫与卫生间（公卫）不宜直接相邻")
     constraints.append("客厅、卧室应靠近采光面")
     constraints.append("客厅应靠近主入口")
     constraints.append("餐厅应与厨房相邻")

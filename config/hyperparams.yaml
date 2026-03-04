@@ -29,11 +29,11 @@ generation:
 # 评估参数
 evaluation:
   # 分数阈值
-  score_threshold: 85
+  score_threshold: 90
   # 最大迭代次数
   max_iterations: 5
   # 改进阈值（低于此值视为收敛）
-  improvement_threshold: 1.5
+  improvement_threshold: 2.0
   # 评估权重
   weights:
     空间合理性: 0.25

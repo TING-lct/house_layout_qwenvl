@@ -60,6 +60,7 @@ class LayoutRuleEngine:
             'forbidden_pairs': [
                 ["厨房", "卫生间"],
                 ["厨房", "主卫"],
+                ["主卫", "卫生间"],
             ],
             'recommended_pairs': [
                 ["厨房", "餐厅"],

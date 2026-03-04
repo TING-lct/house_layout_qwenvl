@@ -135,6 +135,7 @@ adjacency_rules:
   forbidden_pairs:
     - ["厨房", "卫生间"]
     - ["厨房", "主卫"]
+    - ["主卫", "卫生间"]
   
   # 推荐相邻的房间对
   recommended_pairs:

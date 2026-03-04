@@ -406,7 +406,7 @@ def run_generation(
         score_threshold=score_threshold,
         max_iterations=max_iterations,
         auto_fix=True,
-        improvement_threshold=1.0
+        improvement_threshold=2.0
     )
 
     # ========== 第4步：输出结果 ==========
@@ -573,7 +573,7 @@ if __name__ == "__main__":
     parser.add_argument("--candidates", type=int,
                         default=5, help="每轮候选数 (默认5)")
     parser.add_argument("--threshold", type=float,
-                        default=95.0, help="满意分数阈值 (默认95)")
+                        default=90.0, help="满意分数阈值 (默认90)")
     parser.add_argument("--iterations", type=int,
                         default=5, help="最大迭代轮数 (默认5)")
     parser.add_argument("--model", type=str, default=None,
