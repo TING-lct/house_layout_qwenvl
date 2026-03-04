@@ -269,13 +269,19 @@ class LayoutEvaluator:
                 infra_area = sum(r.area for r in parsed_full_cov.infra)
             available_area = max(boundary.area - infra_area, 1)
             coverage = total_room_area / available_area
-            if coverage < 0.50:
-                score -= 10
+            if coverage < 0.40:
+                score -= 15
                 issues.append(f"空间覆盖率严重不足({coverage:.0%})，存在大面积空白")
-            elif coverage < 0.60:
-                score -= 5
+            elif coverage < 0.50:
+                score -= 8
                 issues.append(f"空间覆盖率偏低({coverage:.0%})")
-            # 注意：60%以上的覆盖率是正常的，墙体/走廊/过渡区需要占用空间
+            elif coverage < 0.60:
+                score -= 3
+                issues.append(f"空间覆盖率略低({coverage:.0%})")
+            # 覆盖率过高也不正常（可能有大面积重叠）
+            elif coverage > 1.05:
+                score -= 10
+                issues.append(f"空间覆盖率异常偏高({coverage:.0%})，可能存在重叠")
 
         return max(0, score), issues
 
@@ -433,7 +439,7 @@ class LayoutEvaluator:
         return max(0, score), issues
 
     def _check_dimension_standards(self, rooms: List[Room]) -> Tuple[float, List[str]]:
-        """检查尺寸规范：最小尺寸 + 最大面积 + 长宽比"""
+        """检查尺寸规范：最小尺寸 + 最大面积 + 理想面积偏差 + 长宽比 + 紧凑度"""
         score = 100.0
         issues = []
 
@@ -447,6 +453,7 @@ class LayoutEvaluator:
                 min_length = constraints.get('min_length', 0)
                 min_area = constraints.get('min_area', 0)
                 max_area = constraints.get('max_area', float('inf'))
+                ideal_area = constraints.get('ideal_area', 0)
 
                 actual_width = min(room.width, room.height)
                 actual_length = max(room.width, room.height)
@@ -465,9 +472,29 @@ class LayoutEvaluator:
                         f"面积不足: {room.name} (最小{min_area/1000000:.1f}平米)")
 
                 if room.area > max_area:
-                    score -= 15
+                    # 面积超标按超出比例阶梯扣分
+                    exceed_ratio = (room.area - max_area) / max(max_area, 1)
+                    if exceed_ratio > 0.5:
+                        penalty = 20  # 超出50%以上重罚
+                    elif exceed_ratio > 0.2:
+                        penalty = 15
+                    else:
+                        penalty = 10
+                    score -= penalty
                     issues.append(
                         f"面积过大: {room.name} ({room.area/1000000:.1f}平米，最大{max_area/1000000:.1f}平米)")
+
+                # 面积偏离理想值检查（软性扣分）
+                if ideal_area > 0 and room.area >= min_area:
+                    deviation = abs(room.area - ideal_area) / ideal_area
+                    if deviation > 1.0:
+                        score -= 8
+                        issues.append(
+                            f"面积偏差过大: {room.name} ({room.area/1000000:.1f}m2，理想{ideal_area/1000000:.1f}m2)")
+                    elif deviation > 0.6:
+                        score -= 4
+                        issues.append(
+                            f"面积偏差较大: {room.name} ({room.area/1000000:.1f}m2，理想{ideal_area/1000000:.1f}m2)")
 
             # 检查长宽比
             if room.width > 0 and room.height > 0:
@@ -481,7 +508,42 @@ class LayoutEvaluator:
                     issues.append(
                         f"比例偏长: {room.name} (长宽比{ratio:.1f}:1，建议≤3:1)")
 
+        # 紧凑度检查：房间之间不应留有过大空隙
+        if len(rooms) >= 3:
+            gap_penalty = self._check_room_compactness(rooms)
+            if gap_penalty > 0:
+                score -= gap_penalty
+                issues.append(f"房间排列不够紧凑，存在较多间隙区域")
+
         return max(0, score), issues
+
+    def _check_room_compactness(self, rooms: List[Room]) -> float:
+        """
+        检查房间紧凑度：统计相邻房间对的比例。
+        如果大部分房间都互不相邻，说明布局分散，应扣分。
+        """
+        if len(rooms) < 2:
+            return 0.0
+
+        total_pairs = 0
+        adjacent_pairs = 0
+
+        for i, r1 in enumerate(rooms):
+            for r2 in rooms[i + 1:]:
+                total_pairs += 1
+                if r1.is_adjacent(r2, tolerance=300):
+                    adjacent_pairs += 1
+
+        if total_pairs == 0:
+            return 0.0
+
+        adjacency_ratio = adjacent_pairs / total_pairs
+        # 至少30%的房间对应该相邻
+        if adjacency_ratio < 0.15:
+            return 8  # 严重分散
+        elif adjacency_ratio < 0.25:
+            return 4  # 较分散
+        return 0.0
 
     @staticmethod
     def _get_room_type(room_name: str) -> str:

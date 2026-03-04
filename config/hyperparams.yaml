@@ -13,7 +13,7 @@ generation:
   # 单次生成参数
   default:
     max_new_tokens: 512
-    temperature: 0.7
+    temperature: 0.6
     top_p: 0.9
     do_sample: true
     repetition_penalty: 1.1
@@ -21,7 +21,7 @@ generation:
   # 多候选生成参数
   multi_candidate:
     num_candidates: 5
-    temperature_range: [0.3, 0.5, 0.7, 0.85, 0.95]
+    temperature_range: [0.2, 0.4, 0.6, 0.75, 0.9]
     top_p: 0.9
     do_sample: true
     max_new_tokens: 512
@@ -29,11 +29,11 @@ generation:
 # 评估参数
 evaluation:
   # 分数阈值
-  score_threshold: 80
+  score_threshold: 85
   # 最大迭代次数
   max_iterations: 5
   # 改进阈值（低于此值视为收敛）
-  improvement_threshold: 1.0
+  improvement_threshold: 1.5
   # 评估权重
   weights:
     空间合理性: 0.25

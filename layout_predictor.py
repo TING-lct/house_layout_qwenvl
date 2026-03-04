@@ -457,7 +457,8 @@ class LayoutPredictor:
             List[LayoutResult]: 候选结果列表
         """
         if temperatures is None:
-            temperatures = [0.3, 0.5, 0.7, 0.85, 0.95][:num_candidates]
+            # 优化温度分布：包含低温（高确定性）和中温（多样性），去掉过高温度
+            temperatures = [0.2, 0.4, 0.6, 0.75, 0.9][:num_candidates]
 
         candidates = []
         for temp in temperatures:
@@ -823,6 +824,19 @@ class LayoutPredictor:
                         fix_instructions.append(issue)
                 else:
                     fix_instructions.append(issue)
+            elif "面积过大" in issue:
+                m = re.search(
+                    r'面积过大.*?:\s*(\S+)\s*\(([\d.]+)平米.*?最大([\d.]+)平米\)', issue)
+                if m:
+                    room, actual_area, max_area = m.group(
+                        1), m.group(2), m.group(3)
+                    fix_instructions.append(
+                        f"{room}面积={actual_area}m2过大，需≤{max_area}m2，请缩小尺寸"
+                    )
+                else:
+                    fix_instructions.append(issue + "，请缩小房间尺寸")
+            elif "面积偏差" in issue:
+                fix_instructions.append(issue + "，请调整尺寸接近理想值")
             elif "重叠" in issue:
                 # 区分基础设施重叠 vs 房间间重叠，给出具体坐标
                 if "基础设施" in issue:
@@ -868,6 +882,10 @@ class LayoutPredictor:
                     fix_instructions.append("客厅应靠近入口，请调整位置")
             elif "不宜相邻" in issue:
                 fix_instructions.append(issue + "，请拉开它们的距离")
+            elif "紧凑" in issue:
+                fix_instructions.append("房间之间间隙过大，请让相邻房间紧贴排列")
+            elif "覆盖率" in issue:
+                fix_instructions.append(issue + "，请增大房间尺寸或调整位置以填充空白")
             else:
                 fix_instructions.append(issue)
 
@@ -901,20 +919,21 @@ class LayoutPredictor:
         return self.rule_engine.validate(layout, existing_layout)
 
 
-# ==================== 房间类型 → 最小尺寸映射（与 rules.yaml 一致） ====================
+# ==================== 房间类型 → 尺寸映射（与 rules.yaml 一致） ====================
 _ROOM_SIZE_SPEC = {
-    "卧室":   {"w": 2400, "l": 3000, "a": 7.2},
-    "主卧":   {"w": 3000, "l": 3600, "a": 10.8},
-    "客厅":   {"w": 3300, "l": 4500, "a": 14.85},
-    "厨房":   {"w": 1800, "l": 2400, "a": 4.32},
-    "卫生间": {"w": 1500, "l": 2100, "a": 3.15},
-    "主卫":   {"w": 1800, "l": 2400, "a": 4.32},
-    "餐厅":   {"w": 1500, "l": 2000, "a": 3.0},
-    "储藏":   {"w": 1200, "l": 1500, "a": 1.8},
-    "玄关":   {"w": 1200, "l": 1500, "a": 1.8},
-    "楼梯":   {"w": 2100, "l": 2400, "a": 5.04},
-    "门廊":   {"w": 1200, "l": 2400, "a": 2.88},
-    "次入口": {"w": 600,  "l": 600,  "a": 0.36},
+    "卧室":   {"w": 2400, "l": 3000, "a_min": 7.2,  "a_max": 18.0},
+    "主卧":   {"w": 3000, "l": 3600, "a_min": 10.8, "a_max": 22.0},
+    "客厅":   {"w": 3300, "l": 4500, "a_min": 14.85, "a_max": 35.0},
+    "厨房":   {"w": 1800, "l": 2400, "a_min": 4.32, "a_max": 10.0},
+    "卫生间": {"w": 1500, "l": 2100, "a_min": 3.15, "a_max": 7.0},
+    "主卫":   {"w": 1800, "l": 2400, "a_min": 4.32, "a_max": 6.5},
+    "餐厅":   {"w": 1500, "l": 2000, "a_min": 3.0,  "a_max": 18.0},
+    "储藏":   {"w": 1200, "l": 1500, "a_min": 1.8,  "a_max": 8.0},
+    "玄关":   {"w": 1200, "l": 1500, "a_min": 1.8,  "a_max": 15.0},
+    "楼梯":   {"w": 2100, "l": 2400, "a_min": 5.04, "a_max": 9.0},
+    "阳台":   {"w": 1200, "l": 2000, "a_min": 2.4,  "a_max": 8.0},
+    "门廊":   {"w": 1200, "l": 2400, "a_min": 2.88, "a_max": 15.0},
+    "次入口": {"w": 600,  "l": 600,  "a_min": 0.36, "a_max": 1.5},
 }
 
 
@@ -928,8 +947,8 @@ def _room_type(name: str) -> str:
 
 def _build_size_constraints(rooms_to_generate: List[str]) -> str:
     """
-    根据待生成房间列表，动态构建最小尺寸约束文本。
-    只列出与本次生成有关的房间类型，避免冗余。
+    根据待生成房间列表，动态构建尺寸约束文本。
+    包含最小尺寸和最大面积限制，避免房间过大或过小。
     """
     seen_types = set()
     lines = []
@@ -938,7 +957,10 @@ def _build_size_constraints(rooms_to_generate: List[str]) -> str:
         if rt in _ROOM_SIZE_SPEC and rt not in seen_types:
             seen_types.add(rt)
             spec = _ROOM_SIZE_SPEC[rt]
-            lines.append(f"{rt}: 短边≥{spec['w']}mm, 长边≥{spec['l']}mm")
+            lines.append(
+                f"{rt}: 短边≥{spec['w']}mm, 长边≥{spec['l']}mm, "
+                f"面积{spec['a_min']}~{spec['a_max']}m2"
+            )
     return "；".join(lines)
 
 
@@ -987,17 +1009,18 @@ def build_query(
 
     size_text = _build_size_constraints(rooms_to_generate)
     if size_text:
-        constraints.append(f"最小尺寸要求：{size_text}")
+        constraints.append(f"尺寸要求：{size_text}")
 
     constraints.append("厨房不宜与卫生间直接相邻")
     constraints.append("客厅、卧室应靠近采光面")
     constraints.append("客厅应靠近主入口")
     constraints.append("餐厅应与厨房相邻")
     constraints.append("房间应尽量填满边界空间，避免大面积空白")
-    constraints.append("房间长宽比不宜超过4:1")
+    constraints.append("房间长宽比不宜超过3:1")
     constraints.append("房间不能与已有的采光区、黑体区、主入口区域重叠")
     constraints.append("坐标和尺寸取300的整数倍（建筑模数对齐）")
     constraints.append("只输出待生成房间的参数，不要包含已有房间")
+    constraints.append("卫生间、主卫面积不宜超过7m2")
 
     query += "\n注意：" + "；".join(constraints) + "。"
     query += "\n请直接输出JSON，格式为```json\n{...}\n```，只包含待生成的房间。"

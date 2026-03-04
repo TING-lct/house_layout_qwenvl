@@ -477,7 +477,7 @@ class LayoutRuleEngine:
         layout: Dict[str, List[int]],
         full_layout: Optional[Dict[str, List[int]]] = None,
         step: int = 300,
-        max_rounds: int = 10,
+        max_rounds: int = 8,
         max_area_ratios: Optional[Dict[str, float]] = None
     ) -> Dict[str, List[int]]:
         """
@@ -489,13 +489,14 @@ class LayoutRuleEngine:
           1. 不与其他房间/基础设施重叠
           2. 不超出边界
           3. 不超过该房间类型的最大面积限制
+          4. 不超过该房间类型的扩张系数上限
         成功则保留，否则回退。重复直到没有任何扩张或达到最大轮数。
 
         Args:
             layout: 生成的房间布局
             full_layout: 完整布局（含边界、采光等）
             step: 每次扩张步长(mm)，默认300
-            max_rounds: 最大迭代轮数，默认10
+            max_rounds: 最大迭代轮数，默认8
             max_area_ratios: 各房间类型的最大面积(mm²)覆盖，默认从rules.yaml读取
         """
         fixed = {k: v.copy() for k, v in layout.items()}
@@ -510,6 +511,10 @@ class LayoutRuleEngine:
             type_max_area[room_type] = constraints.get(
                 'max_area', float('inf'))
 
+        # 读取各类型扩张系数（从config读取，默认1.8）
+        type_expansion_factors = self.rules_config.get('expansion', {}).get(
+            'type_expansion_factors', {})
+
         # 确定扩张优先级：客厅 > 卧室 > 餐厅 > 其他
         priority_order = {"客厅": 0, "主卧": 1, "卧室": 2, "餐厅": 3,
                           "厨房": 4, "卫生间": 5, "主卫": 5, "储藏": 6, "阳台": 7}
@@ -523,8 +528,7 @@ class LayoutRuleEngine:
             key=_sort_key
         )
 
-        # 动态面积上限：按边界可用面积等比分配，防止单房间过度膨胀
-        proportional_limit = float('inf')
+        # 动态面积上限：按边界可用面积和房间类型分配
         avg_area = float('inf')
         if boundary and room_names:
             usable_area = boundary.area
@@ -532,7 +536,10 @@ class LayoutRuleEngine:
                 if is_infrastructure(n) and len(p) == 4:
                     usable_area -= p[2] * p[3]
             avg_area = usable_area / max(len(room_names), 1)
-            proportional_limit = avg_area * 2.0  # 单个房间最多占平均面积的2倍
+
+        # 读取配置中的最大长宽比
+        max_aspect_ratio = self.rules_config.get('expansion', {}).get(
+            'max_aspect_ratio', 3.0)
 
         bx1, by1 = boundary.x, boundary.y
         bx2, by2 = boundary.x2, boundary.y2
@@ -545,11 +552,11 @@ class LayoutRuleEngine:
                 rt = self._get_room_type(name)
                 area_limit = type_max_area.get(rt, float('inf'))
 
-                # 四个方向的扩张操作：(dx, dy, dw, dh)
-                # 向右扩: width + step
-                # 向下扩: height + step
-                # 向左扩: x - step, width + step
-                # 向上扩: y - step, height + step
+                # 获取该类型的扩张系数（默认1.8倍平均面积）
+                expansion_factor = type_expansion_factors.get(rt, 1.8)
+                proportional_limit = avg_area * expansion_factor
+
+                # 四个方向的扩张操作
                 expansions = [
                     (0, 0, step, 0),       # 右
                     (0, 0, 0, step),       # 下
@@ -576,16 +583,13 @@ class LayoutRuleEngine:
                     # 面积上限检查（取类型限制和比例限制的较小值）
                     new_area = new_params[2] * new_params[3]
                     effective_limit = min(area_limit, proportional_limit)
-                    if rt == "客厅":
-                        effective_limit = min(
-                            area_limit, avg_area * 2.5 if boundary else float('inf'))
                     if new_area > effective_limit:
                         continue
 
-                    # 长宽比检查（不超过3:1，避免过于狭长）
+                    # 长宽比检查
                     ratio = max(new_params[2], new_params[3]) / \
                         max(min(new_params[2], new_params[3]), 1)
-                    if ratio > 3.0:
+                    if ratio > max_aspect_ratio:
                         continue
 
                     # 重叠检查
@@ -604,7 +608,7 @@ class LayoutRuleEngine:
         self,
         layout: Dict[str, List[int]],
         full_layout: Dict[str, List[int]] = None,
-        snap_threshold: int = 1800
+        snap_threshold: int = 1500
     ) -> Dict[str, List[int]]:
         """
         将靠近边界的房间吸附到边界边缘。
@@ -614,7 +618,7 @@ class LayoutRuleEngine:
         Args:
             layout: 生成的布局
             full_layout: 完整布局（含边界）
-            snap_threshold: 吸附距离阈值(mm)，默认1800mm
+            snap_threshold: 吸附距离阈值(mm)，默认1500mm
         """
         fixed = {k: v.copy() for k, v in layout.items()}
         combined_base = dict(full_layout or {})
@@ -1258,9 +1262,9 @@ class LayoutRuleEngine:
                 actual_width = min(room.width, room.height)
                 actual_length = max(room.width, room.height)
 
-                if actual_width < min_width * 0.65:  # 允许35%容差（硬性规则仅拦截极端情况）
+                if actual_width < min_width * 0.75:  # 允许25%容差（从35%收紧，更严格拦截极端情况）
                     violations.append(f"宽度严重不足: {room.name}")
-                if actual_length < min_length * 0.65:
+                if actual_length < min_length * 0.75:
                     violations.append(f"长度严重不足: {room.name}")
 
         return {
