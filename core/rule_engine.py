@@ -506,11 +506,17 @@ class LayoutRuleEngine:
         if not boundary:
             return fixed
 
-        # 读取各类型最大面积限制
-        type_max_area = {}
+        # 读取各类型的面积上限：优先用 ideal_area * 1.2 作为软上限，而非 max_area
+        # 原因：max_area是“允许的极端上限”，用它做扩张置会导致房间远超GT实际面积
+        type_expand_area_cap = {}
         for room_type, constraints in self.space_constraints.items():
-            type_max_area[room_type] = constraints.get(
-                'max_area', float('inf'))
+            ideal = constraints.get('ideal_area')
+            max_a = constraints.get('max_area', float('inf'))
+            if ideal:
+                # 用 ideal_area 的 1.2 倍作为扩张上限，但不超过 max_area
+                type_expand_area_cap[room_type] = min(int(ideal * 1.2), max_a)
+            else:
+                type_expand_area_cap[room_type] = max_a
 
         # 读取各类型扩张系数（从config读取，默认1.8）
         type_expansion_factors = self.rules_config.get('expansion', {}).get(
@@ -551,7 +557,7 @@ class LayoutRuleEngine:
             for name in room_names:
                 params = fixed[name]
                 rt = self._get_room_type(name)
-                area_limit = type_max_area.get(rt, float('inf'))
+                area_limit = type_expand_area_cap.get(rt, float('inf'))
 
                 # 获取该类型的扩张系数（默认1.8倍平均面积）
                 expansion_factor = type_expansion_factors.get(rt, 1.8)

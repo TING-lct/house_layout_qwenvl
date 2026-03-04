@@ -461,7 +461,21 @@ class LayoutPredictor:
             temperatures = [0.2, 0.4, 0.6, 0.75, 0.9][:num_candidates]
 
         candidates = []
-        for temp in temperatures:
+
+        # 第一个候选：贪婪采样 (do_sample=False)，最接近训练数据分布
+        greedy_config = GenerationConfig(temperature=0.0, do_sample=False)
+        greedy_result = self.generate(
+            image_path=image_path,
+            query=query,
+            existing_layout=existing_layout,
+            config=greedy_config
+        )
+        candidates.append(greedy_result)
+        logger.info("    候选1(贪婪): %s",
+                    '有效' if greedy_result.layout else '解析失败')
+
+        # 其余候选：不同温度采样
+        for temp in temperatures[:num_candidates - 1]:
             config = GenerationConfig(temperature=temp)
             result = self.generate(
                 image_path=image_path,
