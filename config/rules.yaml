@@ -36,29 +36,29 @@ space_constraints:
     min_width: 1500
     min_length: 2100
     min_area: 3150000   # 3.15m²
-    max_area: 7000000   # 7m²（从9m²收紧，GT最大~6.9m²）
+    max_area: 12000000  # 12m²（GT最大~11.7m²，G81特殊户型）
     ideal_area: 4500000   # 4.5m²
   
   主卫:
     min_width: 1800
     min_length: 2400
     min_area: 4320000   # 4.32m²
-    max_area: 6500000   # 6.5m²（从8m²收紧，GT最大~4.9m²+余量）
+    max_area: 14000000  # 14m²（GT最大~12.15m²，A1特殊设计）
     ideal_area: 4800000   # 4.8m²
   
   餐厅:
     min_width: 1500
     min_length: 2000
     min_area: 3000000   # 3.0m²
-    max_area: 18000000  # 18m²（从22m²收紧，乡村GT最大~15.5m²+余量）
-    ideal_area: 8000000   # 8m²
+    max_area: 25000000  # 25m²（GT最大~21.4m²，乡村餐厅可很大）
+    ideal_area: 10000000  # 10m²（GT中位~11m²，城乡折中）
   
   储藏:
     min_width: 1200
     min_length: 1500
     min_area: 1800000   # 1.8m²
-    max_area: 8000000   # 8m²（从12m²收紧）
-    ideal_area: 4000000   # 4m²
+    max_area: 15000000  # 15m²（GT最大~11.9m²，留余量）
+    ideal_area: 10000000  # 10m²（GT两个样本均~11.8m²，下调避免过度膨胀）
   
   阳台:
     min_width: 1200
@@ -71,8 +71,8 @@ space_constraints:
     min_width: 1200
     min_length: 1500
     min_area: 1800000   # 1.8m²
-    max_area: 15000000  # 15m²（从22m²收紧，乡村GT最大~21m²但属特殊情况）
-    ideal_area: 6000000   # 6m²
+    max_area: 25000000  # 25m²（GT最大~21.4m²，乡村玄关可很大）
+    ideal_area: 10000000  # 10m²（城市偏小，乡村偏大，取折中）
   
   楼梯:
     min_width: 2100

@@ -271,13 +271,13 @@ class LayoutEvaluator:
             available_area = max(boundary.area - infra_area, 1)
             coverage = total_room_area / available_area
             if coverage < 0.40:
-                score -= 15
+                score -= 20
                 issues.append(f"空间覆盖率严重不足({coverage:.0%})，存在大面积空白")
-            elif coverage < 0.50:
-                score -= 8
+            elif coverage < 0.55:
+                score -= 12
                 issues.append(f"空间覆盖率偏低({coverage:.0%})")
-            elif coverage < 0.60:
-                score -= 3
+            elif coverage < 0.65:
+                score -= 5
                 issues.append(f"空间覆盖率略低({coverage:.0%})")
             # 覆盖率过高也不正常（可能有大面积重叠）
             elif coverage > 1.05:
@@ -485,17 +485,21 @@ class LayoutEvaluator:
                     issues.append(
                         f"面积过大: {room.name} ({room.area/1000000:.1f}平米，最大{max_area/1000000:.1f}平米)")
 
-                # 面积偏离理想值检查（软性扣分）
+                # 面积偏离理想值检查（加强版：降低阈值、加大惩罚力度）
                 if ideal_area > 0 and room.area >= min_area:
                     deviation = abs(room.area - ideal_area) / ideal_area
                     if deviation > 1.0:
-                        score -= 8
+                        score -= 12
                         issues.append(
                             f"面积偏差过大: {room.name} ({room.area/1000000:.1f}m2，理想{ideal_area/1000000:.1f}m2)")
-                    elif deviation > 0.6:
-                        score -= 4
+                    elif deviation > 0.5:
+                        score -= 8
                         issues.append(
                             f"面积偏差较大: {room.name} ({room.area/1000000:.1f}m2，理想{ideal_area/1000000:.1f}m2)")
+                    elif deviation > 0.3:
+                        score -= 4
+                        issues.append(
+                            f"面积偏差中等: {room.name} ({room.area/1000000:.1f}m2，理想{ideal_area/1000000:.1f}m2)")
 
             # 检查长宽比
             if room.width > 0 and room.height > 0:

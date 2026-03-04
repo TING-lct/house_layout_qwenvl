@@ -222,6 +222,41 @@ TEST_CASES = {
 }
 
 
+def find_available_llm_model() -> Optional[str]:
+    """查找可用的LLM评估模型路径（Qwen2.5-14B-Instruct）"""
+    candidates = [
+        # 相对路径
+        Path("models/Qwen2.5-14B-Instruct"),
+        # AutoDL 目录
+        Path("/root/autodl-tmp/models/Qwen2.5-14B-Instruct"),
+        Path("/autodl-tmp/models/Qwen2.5-14B-Instruct"),
+    ]
+
+    for p in candidates:
+        if p.exists() and (p / "config.json").exists():
+            logger.info(f"找到LLM评估模型: {p}")
+            return str(p)
+
+    logger.info("未找到本地LLM评估模型 (Qwen2.5-14B-Instruct)")
+    return None
+
+
+def find_available_llm_adapter() -> Optional[str]:
+    """查找可用的LLM评估模型LoRA适配器路径"""
+    candidates = [
+        Path("/root/autodl-tmp/qwen14b/Qwen2.5-14B-Instruct/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"),
+        Path("F:/task/户型图生成/qwen14b/Qwen2.5-14B-Instruct/Qwen2.5-14B-Instruct/lora/train_2025-12-01-21-17-23"),
+    ]
+
+    for p in candidates:
+        if p.exists() and (p / "adapter_config.json").exists():
+            logger.info(f"找到LLM评估模型适配器: {p}")
+            return str(p)
+
+    logger.info("未找到LLM评估模型适配器，将使用基座模型评估")
+    return None
+
+
 def find_available_model() -> str:
     """查找可用的基座模型路径"""
     def _is_model_dir_complete(model_dir: Path) -> bool:
@@ -333,9 +368,14 @@ def run_generation(
     max_iterations: int = 3,
     base_model_path: Optional[str] = None,
     output_dir: str = "output",
+    llm_model_path: Optional[str] = None,
+    llm_adapter_path: Optional[str] = None,
+    llm_weight: float = 0.4,
 ):
     """
-    运行完整生成流程
+    运行完整生成流程：迭代优化 + LLM二次挑选
+
+    流程：多轮迭代生成→规则修复→问题注入→收集候选池→LLM从候选池精选
 
     Args:
         test_case_name: 测试用例名称
@@ -344,6 +384,9 @@ def run_generation(
         max_iterations: 最大迭代轮数
         base_model_path: 基座模型路径（默认自动查找）
         output_dir: 输出目录
+        llm_model_path: LLM评估模型路径（自动查找，找到则启用LLM挑选）
+        llm_adapter_path: LLM评估模型LoRA路径
+        llm_weight: LLM评分权重（0~1）
     """
     # 选择测试用例
     if test_case_name not in TEST_CASES:
@@ -372,6 +415,13 @@ def run_generation(
     print(f"  每轮候选数: {num_candidates}")
     print(f"  满意阈值: {score_threshold}")
     print(f"  最大迭代: {max_iterations}")
+    _llm_model = llm_model_path or find_available_llm_model()
+    _llm_adapter = llm_adapter_path or find_available_llm_adapter()
+    if _llm_model:
+        print(f"  LLM挑选: ✅ ({_llm_model})")
+        print(f"  LLM权重: {llm_weight}")
+    else:
+        print(f"  LLM挑选: ❌ (未找到LLM模型，仅使用规则评分)")
     print(f"=" * 70)
 
     # ========== 第1步：初始化模型 ==========
@@ -396,8 +446,10 @@ def run_generation(
     )
     print(f"  查询长度: {len(query)} 字符")
 
-    # ========== 第3步：优化生成 ==========
-    print("\n🔄 [3/4] 开始优化生成流程...")
+    # ========== 第3步：迭代优化生成 + 可选LLM二次挑选 ==========
+    print("\n🔄 [3/4] 开始优化生成流程（迭代优化" +
+          (" + LLM挑选）..." if _llm_model else "）..."))
+
     result = predictor.generate_optimized(
         image_path=str(image_path),
         query=query,
@@ -406,7 +458,10 @@ def run_generation(
         score_threshold=score_threshold,
         max_iterations=max_iterations,
         auto_fix=True,
-        improvement_threshold=2.0
+        improvement_threshold=2.0,
+        llm_model_path=_llm_model,
+        llm_adapter_path=_llm_adapter,
+        llm_weight=llm_weight,
     )
 
     # ========== 第4步：输出结果 ==========
@@ -544,7 +599,10 @@ def run_generation(
 
 
 def run_batch(num_cases: int = 0, **kwargs):
-    """批量运行多个测试用例 (num_cases=0 表示全部)"""
+    """批量运行多个测试用例 (num_cases=0 表示全部)
+
+    所有kwargs会传递给run_generation，包括strategy, llm_model_path等
+    """
     cases = list(TEST_CASES.keys())[
         :num_cases] if num_cases > 0 else list(TEST_CASES.keys())
     results = {}
@@ -580,6 +638,18 @@ if __name__ == "__main__":
                         help="基座模型路径 (默认自动查找)")
     parser.add_argument("--output", type=str, default="output", help="输出目录")
     parser.add_argument("--batch", action="store_true", help="批量运行所有测试用例")
+    parser.add_argument(
+        "--llm-model", type=str, default=None,
+        help="LLM评估模型路径 (如Qwen2.5-14B-Instruct)，仅llm-rerank策略使用"
+    )
+    parser.add_argument(
+        "--llm-adapter", type=str, default=None,
+        help="LLM评估模型LoRA适配器路径"
+    )
+    parser.add_argument(
+        "--llm-weight", type=float, default=0.4,
+        help="LLM评分权重(0-1)，规则权重=1-此值 (默认0.4)"
+    )
 
     args = parser.parse_args()
 
@@ -589,7 +659,10 @@ if __name__ == "__main__":
             score_threshold=args.threshold,
             max_iterations=args.iterations,
             base_model_path=args.model,
-            output_dir=args.output
+            output_dir=args.output,
+            llm_model_path=args.llm_model,
+            llm_adapter_path=args.llm_adapter,
+            llm_weight=args.llm_weight,
         )
     else:
         run_generation(
@@ -598,5 +671,8 @@ if __name__ == "__main__":
             score_threshold=args.threshold,
             max_iterations=args.iterations,
             base_model_path=args.model,
-            output_dir=args.output
+            output_dir=args.output,
+            llm_model_path=args.llm_model,
+            llm_adapter_path=args.llm_adapter,
+            llm_weight=args.llm_weight,
         )

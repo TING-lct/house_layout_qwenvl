@@ -273,6 +273,230 @@ class LayoutPredictor:
         self._model_loaded = True
         logger.info("模型加载完成")
 
+    def unload_model(self):
+        """卸载VL模型，释放GPU显存（为加载LLM评估模型腾空间）"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.processor is not None:
+            del self.processor
+            self.processor = None
+        self._model_loaded = False
+
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        import gc
+        gc.collect()
+        logger.info("VL模型已卸载，GPU显存已释放")
+
+    def generate_with_llm_rerank(
+        self,
+        image_path: str,
+        query: str,
+        existing_layout: Dict[str, List[int]],
+        num_candidates: int = 6,
+        llm_model_path: Optional[str] = None,
+        llm_adapter_path: Optional[str] = None,
+        llm_weight: float = 0.4,
+        auto_fix: bool = True,
+    ) -> OptimizedResult:
+        """
+        一次生成多个候选 + LLM二次挑选（用户建议的策略）
+
+        流程：
+        1. VL模型一次性生成N个候选（贪婪 + 不同温度采样）
+        2. 规则引擎修复每个候选
+        3. 规则评分器预筛选
+        4. 卸载VL模型 → 加载14B评估模型
+        5. LLM评估Top-K候选，综合评分挑选最优
+        6. 返回最终结果
+
+        Args:
+            image_path: 输入图片路径
+            query: 查询文本
+            existing_layout: 已有布局参数
+            num_candidates: 候选数量（建议6=1贪婪+5采样）
+            llm_model_path: LLM评估模型路径（如Qwen2.5-14B-Instruct）
+            llm_adapter_path: LLM评估模型的LoRA路径（可选）
+            llm_weight: LLM评分权重（0~1，规则权重=1-llm_weight）
+            auto_fix: 是否自动修复候选
+
+        Returns:
+            OptimizedResult: 最终结果
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("🏠 一次生成 + LLM二次挑选 策略")
+        logger.info("=" * 60)
+
+        # ========== 第1步：一次性生成所有候选 ==========
+        logger.info("📝 [1/4] 生成 %d 个候选...", num_candidates)
+        candidates = self.generate_candidates(
+            image_path=image_path,
+            query=query,
+            existing_layout=existing_layout,
+            num_candidates=num_candidates,
+        )
+
+        valid_count = sum(1 for c in candidates if c.layout)
+        logger.info("  ✅ 有效候选: %d/%d", valid_count, len(candidates))
+
+        # ========== 第2步：规则修复 + 后处理 ==========
+        logger.info("🔧 [2/4] 规则修复 + 后处理...")
+        scored_candidates = []
+
+        for i, cand in enumerate(candidates):
+            if not cand.layout:
+                logger.info("  候选%d: ❌ 解析失败，跳过", i + 1)
+                continue
+
+            cur = cand.layout
+            if auto_fix:
+                try:
+                    fix_result = self.rule_engine.validate_and_fix(
+                        cur, existing_layout)
+                    if fix_result.fixed_layout:
+                        cur = fix_result.fixed_layout
+                    cur = self.rule_engine.optimize_dimensions(
+                        cur, existing_layout)
+                    cur = self.rule_engine.aggressive_post_process(
+                        cur, existing_layout)
+                except Exception as e:
+                    logger.warning("  候选%d 修复异常: %s", i + 1, e)
+
+            eval_result = self.evaluator.evaluate(cur, existing_layout)
+            validation = self.rule_engine.validate(cur, existing_layout)
+
+            scored_candidates.append({
+                'index': i,
+                'layout': cur,
+                'raw_output': cand.raw_output,
+                'score': eval_result.total_score,
+                'evaluation': eval_result,
+                'is_rule_valid': validation.valid,
+            })
+
+            status = "✅" if validation.valid else "⚠️"
+            logger.info("  候选%d: %s 规则得分=%.1f, 规则通过=%s",
+                        i + 1, status, eval_result.total_score, validation.valid)
+
+        if not scored_candidates:
+            return OptimizedResult(
+                layout={}, raw_output="", score=0,
+                is_satisfactory=False,
+                issues=["所有候选均解析失败"],
+                suggestions=["请检查输入参数和图片路径"],
+                candidates_count=len(candidates),
+                optimization_rounds=1,
+                iteration_history=[],
+            )
+
+        # 按规则得分排序
+        scored_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        # ========== 第3步：LLM二次挑选（如果提供了LLM模型） ==========
+        if llm_model_path:
+            top_k = min(3, len(scored_candidates))
+            logger.info("🤖 [3/4] LLM二次评估 Top-%d 候选...", top_k)
+
+            # 卸载VL模型释放显存
+            self.unload_model()
+
+            # 加载14B评估模型
+            try:
+                from core.llm_evaluator import LLMLayoutEvaluator
+                llm_evaluator = LLMLayoutEvaluator(
+                    model_path=llm_model_path,
+                    adapter_path=llm_adapter_path,
+                    device=self.device,
+                )
+
+                rule_weight = 1.0 - llm_weight
+
+                for c in scored_candidates[:top_k]:
+                    try:
+                        llm_result = llm_evaluator.evaluate(
+                            c['layout'], existing_layout)
+                        # LLM评分是10分制，转换到100分制
+                        llm_score_100 = llm_result.total_score * 10
+                        c['llm_score'] = llm_score_100
+                        c['combined_score'] = (
+                            c['score'] * rule_weight +
+                            llm_score_100 * llm_weight
+                        )
+                        logger.info(
+                            "  候选%d: 规则=%.1f, LLM=%.1f (×10=%.1f), 综合=%.1f",
+                            c['index'] + 1, c['score'],
+                            llm_result.total_score, llm_score_100,
+                            c['combined_score']
+                        )
+                    except Exception as e:
+                        logger.warning("  候选%d LLM评估失败: %s", c['index'] + 1, e)
+                        c['combined_score'] = c['score']
+
+                # 清理LLM模型
+                del llm_evaluator
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                import gc
+                gc.collect()
+
+                # 按综合分选最优
+                top_candidates = scored_candidates[:top_k]
+                best = max(top_candidates, key=lambda x: x.get(
+                    'combined_score', x['score']))
+
+                logger.info("  🏆 LLM挑选: 候选%d (综合=%.1f)",
+                            best['index'] + 1,
+                            best.get('combined_score', best['score']))
+
+            except Exception as e:
+                logger.error("LLM评估器加载失败: %s，回退到规则评分", e)
+                best = scored_candidates[0]
+        else:
+            logger.info("🔍 [3/4] 纯规则评分筛选（未指定LLM模型）...")
+            best = scored_candidates[0]
+            logger.info("  🏆 规则最优: 候选%d (得分=%.1f)",
+                        best['index'] + 1, best['score'])
+
+        # ========== 第4步：返回结果 ==========
+        final_eval = best['evaluation']
+        final_score = best.get('combined_score', best['score'])
+
+        logger.info("\n" + "=" * 60)
+        logger.info("🎯 生成完成!")
+        logger.info("  最终得分: %.1f (规则) / %.1f (综合)",
+                    best['score'], final_score)
+        logger.info("  有效候选: %d/%d", len(scored_candidates), len(candidates))
+        if final_eval.issues:
+            logger.info("  剩余问题: %d 个", len(final_eval.issues))
+        logger.info("=" * 60)
+
+        return OptimizedResult(
+            layout=best['layout'],
+            raw_output=best['raw_output'],
+            score=best['score'],
+            is_satisfactory=best['score'] >= 85.0,
+            issues=final_eval.issues,
+            suggestions=final_eval.suggestions,
+            candidates_count=len(candidates),
+            optimization_rounds=1,
+            iteration_history=[{
+                'iteration': 1,
+                'query_type': '一次生成+LLM挑选',
+                'num_candidates': len(candidates),
+                'num_valid': len(scored_candidates),
+                'best_score': best['score'],
+                'llm_score': best.get('llm_score', 0),
+                'combined_score': best.get('combined_score', best['score']),
+            }],
+        )
+
     def generate_raw(
         self,
         image_path: str,
@@ -529,18 +753,16 @@ class LayoutPredictor:
         score_threshold: float = 85.0,
         max_iterations: int = 3,
         auto_fix: bool = True,
-        improvement_threshold: float = 3.0
+        improvement_threshold: float = 3.0,
+        llm_model_path: Optional[str] = None,
+        llm_adapter_path: Optional[str] = None,
+        llm_weight: float = 0.4,
     ) -> OptimizedResult:
         """
-        完整优化生成流程：
-        多候选生成 → 评估打分 → 选择最优 → 规则修复 → 识别问题 → 
+        完整优化生成流程（迭代优化 + 可选LLM二次挑选）：
+        多候选生成 → 评估打分 → 选择最优 → 规则修复 → 识别问题 →
         注入问题到Prompt → 重新生成 → 循环直到满意
-
-        实现优化技术方案中的迭代优化策略：
-        1. 多样性生成：通过不同温度采样产生多个候选
-        2. 评分选择：对候选进行五维度评估，选择最优
-        3. 规则修复：对最优候选进行硬性规则修复
-        4. 迭代修正：将本轮问题注入Prompt，引导模型在下一轮避免
+        → [可选] 卸载VL模型 → 加载LLM → 从候选池中精选最优
 
         Args:
             image_path: 图片路径
@@ -551,6 +773,9 @@ class LayoutPredictor:
             max_iterations: 最大迭代轮数
             auto_fix: 是否使用规则引擎自动修复
             improvement_threshold: 最小改进阈值（低于此值视为收敛）
+            llm_model_path: LLM评估模型路径（提供则启用LLM二次挑选）
+            llm_adapter_path: LLM评估模型LoRA路径
+            llm_weight: LLM评分权重（0~1，规则权重=1-llm_weight）
 
         Returns:
             OptimizedResult: 包含完整优化历史的结果
@@ -561,6 +786,8 @@ class LayoutPredictor:
         best_eval: Optional[EvaluationResult] = None
         total_candidates = 0
         history: List[Dict[str, Any]] = []
+        # 候选池：收集所有轮次中修复+后处理后的优质候选，供LLM最终挑选
+        candidate_pool: List[Dict[str, Any]] = []
 
         current_query = query  # 初始查询
         consecutive_no_improve = 0  # 连续未改进轮数计数
@@ -674,6 +901,18 @@ class LayoutPredictor:
                     except Exception as e:
                         logger.warning("    候选%d 修复异常: %s", c['index'] + 1, e)
 
+            # 将本轮所有有效候选加入候选池（供最终LLM挑选）
+            for c in candidate_details:
+                candidate_pool.append({
+                    'layout': c['layout'],
+                    'raw_output': c.get('raw_output', ''),
+                    'score': c['score'],
+                    'evaluation': c['evaluation'],
+                    'is_rule_valid': c['is_rule_valid'],
+                    'iteration': iteration + 1,
+                    'index': c['index'],
+                })
+
             # 选择最优：优先选规则通过的，其次选得分最高的
             valid_candidates = [
                 c for c in candidate_details if c['is_rule_valid']]
@@ -765,29 +1004,125 @@ class LayoutPredictor:
                 iteration_history=history
             )
 
-        # 最终规则修复 + 尺寸优化 + 激进后处理
-        if auto_fix:
-            final_fix = self.rule_engine.validate_and_fix(
-                best_layout, existing_layout)
-            if final_fix.fixed_layout:
-                best_layout = final_fix.fixed_layout
-            best_layout = self.rule_engine.optimize_dimensions(
-                best_layout, existing_layout
-            )
-            # 激进后处理：反复执行 修复→尺寸优化(含重定位)→相邻修复→边界吸附
-            best_layout = self.rule_engine.aggressive_post_process(
-                best_layout, existing_layout, max_passes=5
-            )
-            best_eval = self.evaluator.evaluate(best_layout, existing_layout)
+        # 对候选池中所有候选执行激进后处理 + 重新评分
+        if auto_fix and candidate_pool:
+            logger.info("\n🔧 候选池后处理（共 %d 个候选）...", len(candidate_pool))
+            for c in candidate_pool:
+                try:
+                    processed = self.rule_engine.aggressive_post_process(
+                        c['layout'], existing_layout)
+                    c['layout'] = processed
+                    c['evaluation'] = self.evaluator.evaluate(
+                        processed, existing_layout)
+                    c['score'] = c['evaluation'].total_score
+                except Exception as e:
+                    logger.warning("  候选池后处理异常: %s", e)
+            # 按规则得分降序排列
+            candidate_pool.sort(key=lambda x: x['score'], reverse=True)
 
-        # 确保 best_eval 不为 None（逻辑上此处 best_layout 非 None 时 best_eval 也非 None）
+        # ========== LLM二次挑选（如果提供了LLM模型路径） ==========
+        if llm_model_path and candidate_pool:
+            top_k = min(5, len(candidate_pool))
+            logger.info("\n🤖 LLM二次挑选: 从候选池 Top-%d 中精选...", top_k)
+
+            # 卸载VL模型释放显存
+            self.unload_model()
+
+            try:
+                from core.llm_evaluator import LLMLayoutEvaluator
+                llm_evaluator = LLMLayoutEvaluator(
+                    model_path=llm_model_path,
+                    adapter_path=llm_adapter_path,
+                    device=self.device,
+                )
+
+                rule_weight = 1.0 - llm_weight
+
+                for c in candidate_pool[:top_k]:
+                    try:
+                        llm_result = llm_evaluator.evaluate(
+                            c['layout'], existing_layout)
+                        llm_score_100 = llm_result.total_score * 10
+                        c['llm_score'] = llm_score_100
+                        c['combined_score'] = (
+                            c['score'] * rule_weight +
+                            llm_score_100 * llm_weight
+                        )
+                        logger.info(
+                            "  第%d轮候选%d: 规则=%.1f, LLM=%.1f(×10=%.1f), 综合=%.1f",
+                            c['iteration'], c['index'] + 1,
+                            c['score'], llm_result.total_score,
+                            llm_score_100, c['combined_score']
+                        )
+                    except Exception as e:
+                        logger.warning("  LLM评估失败: %s", e)
+                        c['combined_score'] = c['score']
+
+                # 清理LLM模型
+                del llm_evaluator
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                import gc
+                gc.collect()
+
+                # 按综合分选最优
+                llm_best = max(
+                    candidate_pool[:top_k],
+                    key=lambda x: x.get('combined_score', x['score'])
+                )
+                best_layout = llm_best['layout']
+                best_raw_output = llm_best.get('raw_output', '')
+                best_eval = llm_best['evaluation']
+                best_score = llm_best.get('combined_score', llm_best['score'])
+
+                logger.info("  🏆 LLM最终挑选: 第%d轮候选%d (综合=%.1f, 规则=%.1f)",
+                            llm_best['iteration'], llm_best['index'] + 1,
+                            best_score, llm_best['score'])
+
+            except Exception as e:
+                logger.error("LLM评估器加载失败: %s，使用迭代最优结果", e)
+                # 回退：使用候选池中规则评分最高的
+                pool_best = candidate_pool[0]
+                best_layout = pool_best['layout']
+                best_raw_output = pool_best.get('raw_output', '')
+                best_eval = pool_best['evaluation']
+                best_score = pool_best['score']
+
+        elif candidate_pool:
+            # 无LLM模型：从候选池选规则评分最高的
+            pool_best = candidate_pool[0]  # 已按得分排序
+            if pool_best['score'] > best_score:
+                best_layout = pool_best['layout']
+                best_raw_output = pool_best.get('raw_output', '')
+                best_eval = pool_best['evaluation']
+                best_score = pool_best['score']
+        else:
+            # 候选池为空，对迭代最优做最终后处理
+            if auto_fix:
+                final_fix = self.rule_engine.validate_and_fix(
+                    best_layout, existing_layout)
+                if final_fix.fixed_layout:
+                    best_layout = final_fix.fixed_layout
+                best_layout = self.rule_engine.optimize_dimensions(
+                    best_layout, existing_layout)
+                best_layout = self.rule_engine.aggressive_post_process(
+                    best_layout, existing_layout, max_passes=5)
+                best_eval = self.evaluator.evaluate(
+                    best_layout, existing_layout)
+
+        # 确保 best_eval 不为 None
         if best_eval is None:
             best_eval = self.evaluator.evaluate(best_layout, existing_layout)
 
+        llm_tag = " (+LLM挑选)" if llm_model_path else ""
         logger.info("\n" + "=" * 50)
-        logger.info("🎯 优化完成!")
+        logger.info("🎯 优化完成!%s", llm_tag)
         logger.info("  最终得分: %.1f", best_eval.total_score)
-        logger.info("  总候选数: %d", total_candidates)
+        logger.info("  总候选数: %d（候选池: %d）",
+                    total_candidates, len(candidate_pool))
         logger.info("  迭代轮数: %d", len(history))
         logger.info("  是否满意: %s", best_eval.total_score >= score_threshold)
         if best_eval.issues:
